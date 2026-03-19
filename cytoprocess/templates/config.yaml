@@ -4,8 +4,9 @@
 # Numeric ID of the EcoTaxa project to which data will be uploaded.
 # You can find this ID in the URL when viewing your project on EcoTaxa.
 ecotaxa:
-  project_id: null
-  upload_timeout_seconds: 300 
+  project_id: 21095
+  upload_timeout_seconds: 300
+  exclude_columns: []  # optional: list of EcoTaxa TSV columns to omit at prepare time
 
 
 # This part maps instrument metadata items from the .json files to

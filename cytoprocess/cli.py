@@ -120,6 +120,15 @@ def compute_features(ctx, project, force, max_cores):
     from cytoprocess.commands import compute_features
     compute_features.run(ctx, project=project, force=force, max_cores=max_cores)
 
+@cli.command(name="predict_images")
+@click.argument("project")  
+@click.option("--force", is_flag=True, default=False, help="Force processing even if output files already exist")
+@click.pass_context
+def predict_images(ctx, project, force):
+    """Predict image classes using the phyto_classifier API."""
+    from cytoprocess.commands import predict_images
+    predict_images.run(ctx, project=project, force=force)
+
 
 @cli.command(name="prepare")
 @click.argument("project", type=click.Path(exists=True))
@@ -156,6 +165,7 @@ def all(ctx, project, force):
         summarise_pulses,
         extract_images,
         compute_features,
+        predict_images,
         prepare,
         upload,
     )
@@ -174,6 +184,8 @@ def all(ctx, project, force):
     extract_images.run(ctx, project=project, force=force)
     
     compute_features.run(ctx, project=project, force=force)
+    
+    predict_images.run(ctx, project=project, force=force)
     
     prepare.run(ctx, project=project, force=force)
     

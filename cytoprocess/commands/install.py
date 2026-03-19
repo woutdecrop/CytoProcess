@@ -124,7 +124,15 @@ def _download_latest_release(logger) -> str:
 
 
 def _check_or_get_cyz2json(logger) -> str:
-    """Get the path to the cyz2json executable, downloading if necessary."""
+    """Get the path to the cyz2json executable, using local install if present."""
+    print("using wouts version")
+    # 1️⃣ Check local project install first
+    local_install = Path(__file__).parent / "cyz2json_install" / _get_executable_name()
+    if local_install.exists():
+        logger.info(f"Using local cyz2json at {local_install}")
+        return str(local_install)
+    
+    # 2️⃣ Fallback to original .bin directory
     bin_dir = _get_or_create_bin_dir()
     executable_name = _get_executable_name()
     executable_path = bin_dir / executable_name
@@ -135,6 +143,19 @@ def _check_or_get_cyz2json(logger) -> str:
     
     logger.debug(f"Using existing cyz2json at {executable_path}")
     return str(executable_path)
+
+# def _check_or_get_cyz2json(logger) -> str:
+#     """Get the path to the cyz2json executable, downloading if necessary."""
+#     bin_dir = _get_or_create_bin_dir()
+#     executable_name = _get_executable_name()
+#     executable_path = bin_dir / executable_name
+    
+#     if not executable_path.exists():
+#         logger.info(f"Cyz2Json not found at {executable_path}, downloading")
+#         return _download_latest_release(logger)
+    
+#     logger.debug(f"Using existing cyz2json at {executable_path}")
+#     return str(executable_path)
 
 
 def run(ctx):

@@ -269,7 +269,9 @@ def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFr
     cytometric_df = pd.read_parquet(work_dir / f"{sample_id}_cytometric_features.parquet")
     image_features_df = pd.read_parquet(work_dir / f"{sample_id}_image_features.parquet")
     pulses_df = pd.read_parquet(work_dir / f"{sample_id}_pulses.parquet")
-
+    predicted_data_file = work_dir / f"{sample_id}_image_predictions.parquet"
+    
+    predicted_data = pd.read_parquet(predicted_data_file)
     # Extract pixel size from our custom column and remove it
     pixel_size = np.float32(instrument_meta.iloc[0]['__pixel_size__'])
     instrument_meta = instrument_meta.drop(columns=['__pixel_size__'])
@@ -279,6 +281,7 @@ def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFr
     df = df.merge(pulses_df, on=['sample_id', 'object_id'], how='left')
     df = df.merge(sample_meta, on=['sample_id'], how='left')
     df = df.merge(instrument_meta, on=['sample_id'], how='left')
+    df = df.merge(predicted_data, on=['sample_id', 'object_id'], how='left')
 
     # Prepend sample id to acq_id to avoid conflicts
     # (and name process id the same)
@@ -366,7 +369,7 @@ def _prepare_ecotaxa_tsv(df: pd.DataFrame, tsv_file: Path, logger) -> pd.DataFra
         f.write('\t'.join(df.columns) + '\n')
         f.write('\t'.join([type_row[col] for col in df.columns]) + '\n')
         df.to_csv(f, sep='\t', index=False, header=False)
-    
+        df.to_csv(tsv_file.with_suffix('.csv'), index=False)  # also save a CSV version for reference
     logger.debug(f"Saved {df.shape[1]} fields for {df.shape[0]} objects to '{tsv_file}'")
     return df
 

@@ -2,9 +2,10 @@ import logging
 import pandas as pd
 from pathlib import Path
 from cytoprocess.utils import ensure_project_dir, get_sample_files, setup_logging, log_command_start, log_command_success
-
+from datetime import datetime
 
 DEFAULT_EXTRA_FIELDS = "object_lon,object_lat,object_date,object_time,object_depth_min,object_depth_max,object_lon_end,object_lat_end"
+DEFAULT_EXTRA_FIELDS = "object_date,object_time"
 
 
 def run(ctx, project, extra_fields=DEFAULT_EXTRA_FIELDS):
@@ -74,6 +75,9 @@ def run(ctx, project, extra_fields=DEFAULT_EXTRA_FIELDS):
         final_df = samples
         logger.info(f"Created file '{meta_file}' with {len(samples)} sample(s) and {samples.shape[1]-1} field(s), you can now add custom metadata.")
     
+    final_df["object_date"] = datetime.now().strftime("%Y-%m-%d")    
+    final_df["object_time"] = datetime.now().strftime("%H:%M:%S")
+
     # Still save if we added new columns
     if update_meta_file:
         final_df.to_csv(meta_file, index=False)
