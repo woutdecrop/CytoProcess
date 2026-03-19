@@ -16,7 +16,7 @@ from cytoprocess.utils import ensure_project_dir, log_command_start, log_command
 import csv
 
 predict_url_remote = "http://127.0.0.1:5000/v2/models/planktonclas/predict/?ckpt_name=final_model.h5"
-docker_container_name = "phyto_classifier_container_v1"
+docker_container_name = "phyto_classifier_container_cyto"
 docker_image = "wdecrop/cyto-plankton-classifier "
 health_url = "http://127.0.0.1:5000/api"
 
@@ -94,47 +94,77 @@ def _first_value(value):
     return value
 
 
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], list):
+            return _as_list(value[0])
+        return value
+    return [value]
 
-def _extract_prediction(payload: dict, category_mapping: dict) -> tuple[str | None, int | None]:
+
+def _map_prediction_label(label, category_mapping: dict) -> tuple[str | None, int | None]:
+    if isinstance(label, bytes):
+        label = label.decode()
+
+    if label is None:
+        return None, None
+
+    label = str(label)
+    category_id = category_mapping.get(label)
+    print(f"Trying direct mapping for predicted label '{label}'")
+
+    if category_id is None:
+        alt_label = label.replace("_", "<")
+        category_id = category_mapping.get(alt_label)
+        print(f"Trying alternative label '{alt_label}' for original label '{label}'")
+        if category_id is not None:
+            label = alt_label
+
+    if category_id is None:
+        alt_label = label.replace("_", "<").replace(">", " ")
+        category_id = category_mapping.get(alt_label)
+        print(f"Trying alternative label '{alt_label}' for original label '{label}'")
+        if category_id is not None:
+            label = alt_label
+
+    print(f"Mapped predicted label '{label}' to category_id {category_id}")
+    return label, category_id
+
+
+def _extract_top_predictions(payload: dict, category_mapping: dict, top_n: int = 3) -> list[dict]:
     predictions = payload.get("predictions", payload)
-    label = None
+    labels = []
+    probabilities = []
 
     if isinstance(predictions, dict):
         for key in ("pred_lab", "label", "labels", "class_name", "class_names", "category", "categories"):
             if key in predictions:
-                label = _first_value(predictions[key])
-                if label is not None:
+                labels = _as_list(predictions[key])
+                if labels:
                     break
+        for key in ("pred_prob", "prob", "confidence", "score", "scores"):
+            if key in predictions:
+                probabilities = _as_list(predictions[key])
+                break
 
-    if isinstance(label, bytes):
-        label = label.decode()
+    top_predictions = []
+    for index, raw_label in enumerate(labels[:top_n]):
+        label, category_id = _map_prediction_label(raw_label, category_mapping)
+        raw_probability = probabilities[index] if index < len(probabilities) else None
+        probability = None if raw_probability is None else float(_first_value(raw_probability))
 
-    if label is not None:
-        label = str(label)
+        if label:
+            top_predictions.append(
+                {
+                    "label": label,
+                    "category_id": category_id,
+                    "probability": probability,
+                }
+            )
 
-        # 1️⃣ direct mapping
-        category_id = category_mapping.get(label)
-        print(f"Trying direct mapping for predicted label '{label}'")
-        # 2️⃣ fallback: replace '_' with '<'
-        if category_id is None:
-            alt_label = label.replace("_", "<")
-            category_id = category_mapping.get(alt_label)
-            print(f"Trying alternative label '{alt_label}' for original label '{label}'")
-            if category_id is not None:
-                label = alt_label  # update label to match the mapping key if this one works
-        # 3️⃣ fallback: replace '>' with spaces
-        if category_id is None:
-            alt_label = label.replace("_", "<").replace(">", " ")
-            category_id = category_mapping.get(alt_label)
-            print(f"Trying alternative label '{alt_label}' for original label '{label}'")
-            if category_id is not None:
-                label = alt_label  # update label to match the mapping key if this one works
-
-        print(f"Mapped predicted label '{label}' to category_id {category_id}")
-    else:
-        category_id = None
-
-    return label, category_id
+    return top_predictions
 
 def load_category_mapping(tsv_path: Path) -> dict[str, int]:
     mapping = {}
@@ -177,21 +207,38 @@ def _predict_image(image_file: Path, sample_id: str, annotation_date: str, annot
         message = payload.get("message", "Unknown prediction API error")
         raise ValueError(f"Prediction API rejected '{image_file.name}': {message}")
 
-    label, category_id = _extract_prediction(payload, category_mapping)
-    if not label:
+    top_predictions = _extract_top_predictions(payload, category_mapping, top_n=3)
+    if not top_predictions:
         raise ValueError(f"No prediction label returned for '{image_file.name}'")
 
-    return {
+    top_prediction = top_predictions[0]
+    primary_row = {
         "sample_id": sample_id,
         "object_id": f"{sample_id}_{image_file.stem}",
         "object_annotation_date": annotation_date,
         "object_annotation_time": annotation_time,
-        "object_annotation_category": label,
-        "object_annotation_category_id": category_id,
+        "object_annotation_category": top_prediction["label"],
+        "object_annotation_category_id": top_prediction["category_id"],
+        "object_annotation_person_name": "cyto_classifier",
+        "object_annotation_person_email": "wout.decrop@vliz.be",
+        "object_annotation_status": "predicted",
+        "object_annotation_probability": top_prediction["probability"],
+    }
+
+    top3_row = {
+        "sample_id": sample_id,
+        "object_id": f"{sample_id}_{image_file.stem}",
+        "object_annotation_date": annotation_date,
+        "object_annotation_time": annotation_time,
+        "object_annotation_categories": [prediction["label"] for prediction in top_predictions],
+        "object_annotation_category_ids": [prediction["category_id"] for prediction in top_predictions],
+        "object_annotation_probabilities": [prediction["probability"] for prediction in top_predictions],
         "object_annotation_person_name": "cyto_classifier",
         "object_annotation_person_email": "wout.decrop@vliz.be",
         "object_annotation_status": "predicted",
     }
+
+    return {"primary": primary_row, "top3": top3_row}
 
 
 def run(ctx, project, force: bool = False):
@@ -228,10 +275,11 @@ def run(ctx, project, force: bool = False):
     for sample_dir in sample_dirs:
         sample_id = sample_dir.name
         output_file = work_dir / f"{sample_id}_image_predictions.parquet"
+        top3_output_file = work_dir / f"{sample_id}_image_predictions_top3.parquet"
 
         logger.info(f"'{sample_id}'")
 
-        if output_file.exists() and not force:
+        if output_file.exists() and top3_output_file.exists() and not force:
             logger.info("  Skipping, output file already exists (use --force to overwrite)")
             continue
 
@@ -247,7 +295,7 @@ def run(ctx, project, force: bool = False):
 
         try:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                rows = list(
+                results = list(
                     executor.map(
                         _predict_image,
                         image_files,
@@ -259,8 +307,13 @@ def run(ctx, project, force: bool = False):
         except Exception as exc:
             raiseCytoError(f"Error predicting sample '{sample_id}': {exc}", logger)
 
-        df = pd.DataFrame(rows).sort_values("object_id").reset_index(drop=True)
+        df = pd.DataFrame(result["primary"] for result in results).sort_values("object_id").reset_index(drop=True)
+        df_top3 = pd.DataFrame(result["top3"] for result in results).sort_values("object_id").reset_index(drop=True)
+
         df.to_parquet(output_file, index=False)
-        logger.info(f"  Saved {df.shape[0]} predictions to\n  '{output_file}'")
+        df_top3.to_parquet(top3_output_file, index=False)
+
+        logger.info(f"  Saved {df.shape[0]} top-1 predictions to\n  '{output_file}'")
+        logger.info(f"  Saved {df_top3.shape[0]} top-3 predictions to\n  '{top3_output_file}'")
 
     log_command_success(logger, "Predict images")
