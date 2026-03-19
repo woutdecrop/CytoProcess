@@ -244,8 +244,9 @@ def _ensure_sample_data(project: Path, samples: list[str], logger) -> None:
         raiseCytoError("Missing input for some samples. Please run the required extraction steps before preparing EcoTaxa files.", logger)
     
 
-def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFrame, 
-                       instrument_meta_df: pd.DataFrame, logger) -> tuple[pd.DataFrame, float]:
+def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFrame,
+                       instrument_meta_df: pd.DataFrame, logger,
+                       include_predictions: bool = True) -> tuple[pd.DataFrame, float]:
     """
     Merge all data sources for a sample into a single DataFrame.
     
@@ -269,9 +270,10 @@ def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFr
     cytometric_df = pd.read_parquet(work_dir / f"{sample_id}_cytometric_features.parquet")
     image_features_df = pd.read_parquet(work_dir / f"{sample_id}_image_features.parquet")
     pulses_df = pd.read_parquet(work_dir / f"{sample_id}_pulses.parquet")
+    predicted_data = None
     predicted_data_file = work_dir / f"{sample_id}_image_predictions.parquet"
-    
-    predicted_data = pd.read_parquet(predicted_data_file)
+    if include_predictions and predicted_data_file.exists():
+        predicted_data = pd.read_parquet(predicted_data_file)
     # Extract pixel size from our custom column and remove it
     pixel_size = np.float32(instrument_meta.iloc[0]['__pixel_size__'])
     instrument_meta = instrument_meta.drop(columns=['__pixel_size__'])
@@ -281,7 +283,8 @@ def _merge_sample_data(project: Path, sample_id: str, samples_meta_df: pd.DataFr
     df = df.merge(pulses_df, on=['sample_id', 'object_id'], how='left')
     df = df.merge(sample_meta, on=['sample_id'], how='left')
     df = df.merge(instrument_meta, on=['sample_id'], how='left')
-    df = df.merge(predicted_data, on=['sample_id', 'object_id'], how='left')
+    if predicted_data is not None:
+        df = df.merge(predicted_data, on=['sample_id', 'object_id'], how='left')
 
     # Prepend sample id to acq_id to avoid conflicts
     # (and name process id the same)
@@ -426,7 +429,7 @@ def _create_ecotaxa_zip(tsv_file: Path, zip_file: Path, images_dir: Path, pulses
         processed_path.unlink()
 
 
-def run(ctx, project, force=False, only_tsv=False):
+def run(ctx, project, force=False, only_tsv=False, include_predictions: bool = True):
     """Prepare EcoTaxa TSV/ZIP files for samples."""
     logger = setup_logging(command="prepare", project=project, debug=ctx.obj["debug"])
     
@@ -434,6 +437,8 @@ def run(ctx, project, force=False, only_tsv=False):
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
     if only_tsv:
         logger.debug("Only creating TSV files (--only-tsv flag enabled)")
+    if not include_predictions:
+        logger.debug("Prediction columns will be excluded from EcoTaxa TSV/ZIP")
 
     project = Path(project)
     work_dir = project / "work"
@@ -473,7 +478,14 @@ def run(ctx, project, force=False, only_tsv=False):
         logger.info(f"  Collating '{tsv_file}'")
 
         # Merge all data for this sample
-        df, pixel_size = _merge_sample_data(project, sample_id, samples_meta_df, instrument_meta_df,   logger)
+        df, pixel_size = _merge_sample_data(
+            project,
+            sample_id,
+            samples_meta_df,
+            instrument_meta_df,
+            logger,
+            include_predictions=include_predictions,
+        )
 
         # Prepare TSV file
         _prepare_ecotaxa_tsv(df, tsv_file, logger)

@@ -115,12 +115,49 @@ cytoprocess summarise_pulses path/to/project
 cytoprocess extract_images path/to/project
 # extract features from images
 cytoprocess compute_features path/to/project
+# predict image classes with the classifier API
+cytoprocess predict_images path/to/project
 
 # prepare files for ecotaxa upload
 cytoprocess prepare path/to/project
 # upload them to EcoTaxa
 cytoprocess upload path/to/project
+# update existing EcoTaxa objects with predicted classes
+cytoprocess overwrite_ecotaxa path/to/project
+# upload new samples, then apply all available predictions
+cytoprocess upload_all_predictions path/to/project
 ```
+
+### Prediction Upload Modes
+
+`predict_images` creates two prediction files in `work/` for each sample:
+
+```bash
+<sample>_image_predictions.parquet
+<sample>_image_predictions_top3.parquet
+```
+
+The first file stores the top-1 prediction. The second stores the top 3 predicted labels and their scores, in ranking order.
+
+Use the following commands depending on what is already present on EcoTaxa:
+
+```bash
+# Upload samples only, using the standard EcoTaxa ZIP import flow
+cytoprocess upload path/to/project
+
+# Apply predictions to objects that already exist in EcoTaxa
+cytoprocess overwrite_ecotaxa path/to/project
+
+# Rebuild ZIPs without prediction columns, upload them, then apply top-3 predictions
+cytoprocess upload_all_predictions path/to/project
+```
+
+Notes:
+
+- `upload` imports the prepared EcoTaxa ZIP files.
+- `overwrite_ecotaxa` prefers the `*_image_predictions_top3.parquet` file when present and falls back to top-1 otherwise.
+- `upload_all_predictions` avoids importing top-1 predictions first; it uploads the sample data and then applies the top-3 predictions through the EcoTaxa API.
+- EcoTaxa records these as automatic predictions, so the history `Author` field remains empty (`-`) even though the model name is stored in the exported prediction metadata.
 
 
 ### Customisation

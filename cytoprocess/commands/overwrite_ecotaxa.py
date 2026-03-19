@@ -213,11 +213,6 @@ def _classify_objects(
             json=payload,
             timeout=120,
         )
-        logger.info(
-            f" payload: {len(batch_target_ids)} target_ids, {len(batch_classifications)} classifications, {len(batch_scores)} scores"
-        )
-        logger.info(payload)
-        # print(payload)
         if response.status_code != 200:
             raiseCytoError(f"Failed to update EcoTaxa object metadata: {response.text}", logger)
 

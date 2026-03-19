@@ -163,6 +163,17 @@ def overwrite_ecotaxa(ctx, project, username, password):
     overwrite_ecotaxa.run(ctx, project, username=username, password=password)
 
 
+@cli.command(name="upload_all_predictions")
+@click.argument("project", type=click.Path(exists=True))
+@click.option("--username", "-u", help="EcoTaxa email address")
+@click.option("--password", "-p", help="EcoTaxa password")
+@click.pass_context
+def upload_all_predictions(ctx, project, username, password):
+    """Upload EcoTaxa files, then apply top prediction metadata to all matched objects."""
+    from cytoprocess.commands import upload_all_predictions
+    upload_all_predictions.run(ctx, project, username=username, password=password)
+
+
 @cli.command(name="all")
 @click.argument("project")
 @click.option("--force", is_flag=True, default=False, help="Force processing even if output already exists")
