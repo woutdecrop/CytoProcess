@@ -113,23 +113,23 @@ def _map_prediction_label(label, category_mapping: dict) -> tuple[str | None, in
 
     label = str(label)
     category_id = category_mapping.get(label)
-    print(f"Trying direct mapping for predicted label '{label}'")
+    # print(f"Trying direct mapping for predicted label '{label}'")
 
     if category_id is None:
         alt_label = label.replace("_", "<")
         category_id = category_mapping.get(alt_label)
-        print(f"Trying alternative label '{alt_label}' for original label '{label}'")
+        # print(f"Trying alternative label '{alt_label}' for original label '{label}'")
         if category_id is not None:
             label = alt_label
 
     if category_id is None:
         alt_label = label.replace("_", "<").replace(">", " ")
         category_id = category_mapping.get(alt_label)
-        print(f"Trying alternative label '{alt_label}' for original label '{label}'")
+        # print(f"Trying alternative label '{alt_label}' for original label '{label}'")
         if category_id is not None:
             label = alt_label
 
-    print(f"Mapped predicted label '{label}' to category_id {category_id}")
+    # print(f"Mapped predicted label '{label}' to category_id {category_id}")
     return label, category_id
 
 
