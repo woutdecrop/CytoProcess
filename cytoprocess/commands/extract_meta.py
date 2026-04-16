@@ -1,12 +1,14 @@
-import logging
-import ijson
-import yaml
-import pandas as pd
 from pathlib import Path
-from cytoprocess.utils import get_sample_files, ensure_project_dir, get_json_section, setup_logging, log_command_start, log_command_success, raiseCytoError
 
+import click
+import ijson
+import pandas as pd
 
-def _get_json_structure(json_data, prefix=""):
+from cytoprocess.logging import setup_logging, log_command_start, log_command_success
+from cytoprocess.project import list_sample_assets, path_to_sample_asset
+from cytoprocess.utils import get_json_section, load_config, raiseCytoError
+
+def _get_json_structure(json_data: dict, prefix=""):
     """
     Recursively extract all keys from a JSON object and return them as full paths.
     
@@ -57,7 +59,7 @@ def _get_json_structure(json_data, prefix=""):
     return paths
 
 
-def _get_json_item(json_data, path):
+def _get_json_item(json_data: dict, path: str):
     """
     Retrieve value(s) from a JSON object given a path with dot notation.
     
@@ -126,50 +128,51 @@ def _get_json_item(json_data, path):
     return current if current is not None else None
 
 
-def run(ctx, project, list_keys=False):
+def run(ctx: click.Context, project: Path, list_keys: bool=False, force: bool=False):
+    # Housekeeping for the command
     logger = setup_logging(command="extract_meta", project=project, debug=ctx.obj["debug"])
-
     log_command_start(logger, "Extracting metadata", project)
+    if force:
+        logger.debug("Force flag enabled: existing metadata files will be overwritten")
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
-        
+
+
     # Get JSON files from converted directory
-    json_files = get_sample_files(project, logger, kind="json", ctx=ctx)
+    json_files = list_sample_assets(project, kind="json",
+                                    logger=logger, samples_mask=ctx.obj["sample"])
     if not json_files:
-        return
-        
+        return     
     logger.info(f"Processing {len(json_files)} .json file(s)")
         
     if list_keys:
         # If the --list argument is provided, extract metadata keys from each JSON file and store them in a text file
         # This will be the basis for the user to create metadata_config.yaml
 
-        keys = []
-        for json_file in json_files:
+        keys = set()
+        for idx,json_file in enumerate(json_files):
             try:
                 # Load the instrument section of the json file
                 instrument_data = get_json_section(json_file, 'instrument', logger)
 
                 # If it is found, extract all the metadata keys it contains
                 if instrument_data is not None:
-                    keys.extend(_get_json_structure(instrument_data))
+                    new_keys = set(_get_json_structure(instrument_data))
+                    n_new = len(new_keys - keys)
+                    if n_new > 0:
+                        keys.update(new_keys)
+                    logger.info(f"Found {n_new} " + ("new " if idx>0 else "") + f"metadata keys in '{json_file.parents[0].name}'")
                 
             except ijson.JSONError as e:
                 raiseCytoError(f"Failed to parse .json file '{json_file.name}': {e}", logger)
             except Exception as e:
                 raiseCytoError(f"Error reading '{json_file.name}': {e}", logger)
 
-            logger.info(f"Found {len(keys)} metadata items in '{json_file.name}'")
-
         # If there are multiple json files, deduplicate keys
         if len(json_files) > 1:
-            keys = list(set(keys))
             logger.info(f"Found {len(keys)} unique metadata items across all .json files")
 
-        # Make sure config directory exists
-        meta_dir = ensure_project_dir(project, "meta")
-
         # Write keys to file
-        keys_file = meta_dir / "available_metadata_fields.txt"
+        keys_file = project / "config" / "available_metadata_fields.txt"
         with open(keys_file, 'w') as f:
             for key_path in sorted(keys):
                 f.write(f"{key_path}\n")
@@ -178,35 +181,37 @@ def run(ctx, project, list_keys=False):
 
     else:
         # Otherwise, in normal operations, extract specific metadata items based on config.yaml
+        config = load_config(project, logger)
 
-        config_file = Path(project) / "config" / "config.yaml"
-        
-        if not config_file.exists():
-            raiseCytoError(f"Configuration file not found: '{config_file}', run 'cytoprocess create {project}' again.", logger)
-        
-        logger.info(f"Read metadata fields list from '{config_file}'")
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
-        
-        # Prepare data structure: list of dicts, one per JSON file
-        metadata_rows = []
-        
+        # Ensure work directory exists to store the output
+        work_dir = project / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+                
         for json_file in json_files:
+            # Get sample_id from file name
+            sample_id = json_file.parents[0].name
+            output_file = project / path_to_sample_asset(sample_id, 'metadata', logger)
+
+            logger.info(f"'{sample_id}'")
+           
+            # Skip if output file exists and force is not set
+            if output_file.exists() and not force:
+                logger.info(f"  Skipping, output file already exists (use --force to overwrite)")
+                continue
+
             try:
-                logger.debug(f"Extracting metadata from '{json_file.name}'")
+                logger.debug(f"Extracting metadata for '{sample_id}'")
 
                 # Load the instrument section of the json file
                 instrument_data = get_json_section(json_file, 'instrument', logger)
 
-                # If it is found, extract all the metadata keys it contains
                 if instrument_data is None:
+                    logger.warning(f"No 'instrument' section found in '{json_file.name}', skipping metadata extraction for this file")
                     continue
 
-                # Create a row for this file
-                row = {}
+                # Initialise metadata dictionary with sample_id
+                meta = {'sample_id': sample_id}
                 
-                # Define the sample_id to join this with the rest of the data
-                row['sample_id'] = json_file.stem
                 # Process each section (sample, acq, process)
                 for section_name in ['sample', 'acq', 'process']:
                     section_keys = config.get(section_name)
@@ -225,51 +230,18 @@ def run(ctx, project, list_keys=False):
                         
                         if value is None:
                             logger.debug(f"Key '{json_path}' not found in {json_file.name}")
-                        
-                        row[full_column_name] = value
-
-                    # Force the inclusion of pixel size because we need it later
-                    # (to draw the scale bar on images)
-                    row["__pixel_size__"] = _get_json_item(instrument_data, 'measurementSettings.CytoSettings.CytoSettings.iif.ImageScaleMuPerPixelP')
+                        else:
+                            meta[full_column_name] = value
                 
-                metadata_rows.append(row)
-                logger.info(f"Extracted {len(row)-2} metadata fields from '{json_file.name}'")
-                # NB: -2 to exclude the sample_id and __pixel_size__ fields
+                logger.info(f"  Extracted {len(meta)-1} metadata fields")
+                # NB: -1 to exclude the sample_id field
                 
             except ijson.JSONError as e:
                 raiseCytoError(f"Failed to parse .json file '{json_file.name}': {e}", logger)
             except Exception as e:
                 raiseCytoError(f"Error processing '{json_file.name}': {e}", logger)
         
-        # Save to paquet in work directory
-        work_dir = ensure_project_dir(project, "work")
-        output_file = work_dir / "sample_metadata_from_instrument.parquet"
-        logger.info(f"Saving metadata to '{output_file}'")
-        
-        # Create DataFrame from newly extracted metadata
-        new_df = pd.DataFrame(metadata_rows)
-
-        # Check if the parquet file already exists
-        if output_file.exists():
-            # TODO consider requiring --force here like in other commands
-            logger.debug(f"Metadata file exists, updating rows")
-            existing_df = pd.read_parquet(output_file)
-            
-            # Remove rows from existing_df that have the same sample_id as in new_df
-            existing_df = existing_df[~existing_df['sample_id'].isin(new_df['sample_id'])]
-
-            logger.debug(f"Updating/appending {len(new_df)} row(s)")
-            df = pd.concat([existing_df, new_df], ignore_index=True)
-
-        else:
-            logger.debug(f"Creating new metadata file")
-            df = new_df
-        
-        # Sort by sample_id, for consistency
-        df = df.sort_values('sample_id').reset_index(drop=True)
-
-        df.to_parquet(output_file, index=False)
-        logger.debug(f"Metadata shape: {df.shape[0]} rows × {df.shape[1]} columns")
+            logger.info(f"  Saving to '{output_file}'")
+            pd.DataFrame([meta]).to_parquet(output_file, index=False)
 
     log_command_success(logger, "Extract metadata")
-

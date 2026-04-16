@@ -1,282 +1,19 @@
-import getpass
-import logging
 from pathlib import Path
 
-import keyring
 import pandas as pd
 import requests
 import yaml
 
-from cytoprocess.utils import (
-    log_command_start,
-    log_command_success,
-    raiseCytoError,
-    setup_logging,
-)
-
-ECOTAXA_API_URL = "https://ecotaxa.obs-vlfr.fr/api"
-KEYRING_SERVICE = "cytoprocess-ecotaxa"
-OBJECT_QUERY_WINDOW_SIZE = 1000
-CLASSIFY_BATCH_SIZE = 1000
-
-
-def _get_stored_token(logger: logging.Logger) -> str | None:
-    try:
-        return keyring.get_password(KEYRING_SERVICE, "token")
-    except Exception as exc:
-        logger.debug(f"Could not retrieve token from keyring: {exc}")
-        return None
-
-
-def _store_token(logger: logging.Logger, token: str) -> bool:
-    try:
-        keyring.set_password(KEYRING_SERVICE, "token", token)
-        return True
-    except Exception as exc:
-        logger.warning(f"Could not store token in keyring: {exc}")
-        return False
-
-
-def _clear_token(logger: logging.Logger) -> None:
-    try:
-        keyring.delete_password(KEYRING_SERVICE, "token")
-    except Exception:
-        pass
-
-
-def _validate_token(logger: logging.Logger, token: str) -> bool:
-    try:
-        response = requests.get(
-            f"{ECOTAXA_API_URL}/users/me",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        return response.status_code == 200
-    except requests.RequestException:
-        return False
-
-
-def _login(logger: logging.Logger, username: str, password: str) -> str | None:
-    try:
-        response = requests.post(
-            f"{ECOTAXA_API_URL}/login",
-            json={"username": username, "password": password},
-            timeout=30,
-        )
-        if response.status_code == 200:
-            return response.json()
-        logger.error(f"Login failed: {response.text}")
-        return None
-    except requests.RequestException as exc:
-        logger.error(f"Login request failed: {exc}")
-        return None
-
-
-def _get_user_info(logger: logging.Logger, token: str) -> dict | None:
-    try:
-        response = requests.get(
-            f"{ECOTAXA_API_URL}/users/me",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        if response.status_code == 200:
-            return response.json()
-        return None
-    except requests.RequestException:
-        return None
-
-
-def _get_project_info(logger: logging.Logger, token: str, project_id: int) -> dict | None:
-    try:
-        response = requests.get(
-            f"{ECOTAXA_API_URL}/projects/{project_id}",
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=30,
-        )
-        if response.status_code == 200:
-            return response.json()
-        if response.status_code == 403:
-            logger.error(f"Access denied to project {project_id}")
-        elif response.status_code == 404:
-            logger.error(f"Project {project_id} not found")
-        return None
-    except requests.RequestException as exc:
-        logger.error(f"Failed to get project info: {exc}")
-        return None
-
-
-def _get_project_samples(logger: logging.Logger, token: str, project_id: int) -> dict[str, int]:
-    try:
-        response = requests.get(
-            f"{ECOTAXA_API_URL}/samples/search",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"project_ids": str(project_id), "id_pattern": "*"},
-            timeout=60,
-        )
-        if response.status_code != 200:
-            logger.warning(f"Failed to get samples: {response.text}")
-            return {}
-
-        sample_map = {}
-        for sample in response.json():
-            orig_id = sample.get("orig_id")
-            sample_id = sample.get("sampleid")
-            if orig_id and sample_id is not None:
-                sample_map[str(orig_id)] = int(sample_id)
-        return sample_map
-    except requests.RequestException as exc:
-        logger.warning(f"Failed to get project samples: {exc}")
-        return {}
-
-
-def _get_sample_object_map(
-    logger: logging.Logger,
-    token: str,
-    project_id: int,
-    sample_ecotaxa_id: int,
-) -> dict[str, int]:
-    object_map: dict[str, int] = {}
-    window_start = 0
-
-    while True:
-        response = requests.post(
-            f"{ECOTAXA_API_URL}/object_set/{project_id}/query",
-            headers={"Authorization": f"Bearer {token}"},
-            params={
-                "fields": "obj.orig_id",
-                "window_start": window_start,
-                "window_size": OBJECT_QUERY_WINDOW_SIZE,
-            },
-            json={"samples": str(sample_ecotaxa_id)},
-            timeout=120,
-        )
-
-        if response.status_code != 200:
-            raiseCytoError(f"Failed to query EcoTaxa objects: {response.text}", logger)
-
-        payload = response.json()
-        object_ids = payload.get("object_ids", [])
-        details = payload.get("details", [])
-        total_ids = int(payload.get("total_ids", 0) or 0)
-
-        if not object_ids:
-            break
-
-        for object_id, detail in zip(object_ids, details):
-            if not detail:
-                continue
-            orig_id = detail[0]
-            if orig_id is None:
-                continue
-            object_map[str(orig_id)] = int(object_id)
-
-        window_start += len(object_ids)
-        if window_start >= total_ids:
-            break
-
-    return object_map
-
-
-def _classify_objects(
-    logger: logging.Logger,
-    token: str,
-    target_ids: list[int],
-    classifications: list[list[int]],
-    scores: list[list[float]],
-) -> int:
-    updated = 0
-    total = len(target_ids)
-
-    for start in range(0, total, CLASSIFY_BATCH_SIZE):
-        end = start + CLASSIFY_BATCH_SIZE
-        batch_target_ids = target_ids[start:end]
-        batch_classifications = classifications[start:end]
-        batch_scores = scores[start:end]
-        batch_number = (start // CLASSIFY_BATCH_SIZE) + 1
-        batch_end = min(end, total)
-
-        logger.info(
-            f"    Batch {batch_number}: sending {len(batch_target_ids)} object(s) "
-            f"({start + 1}-{batch_end}/{total})"
-        )
-
-        payload = {
-            "target_ids": batch_target_ids,
-            "classifications": batch_classifications,
-            "scores": batch_scores,
-            "keep_log": True,
-        }
-
-        response = requests.post(
-            f"{ECOTAXA_API_URL}/object_set/classify_auto_multiple",
-            headers={"Authorization": f"Bearer {token}"},
-            json=payload,
-            timeout=120,
-        )
-        if response.status_code != 200:
-            raiseCytoError(f"Failed to update EcoTaxa object metadata: {response.text}", logger)
-
-        batch_updated = int(response.json() or 0)
-        updated += batch_updated
-        logger.info(
-            f"    Batch {batch_number}: updated {batch_updated} object(s) "
-            f"(total {updated}/{total})"
-        )
-
-    return updated
-
-
-def authenticate(logger: logging.Logger, username: str | None = None, password: str | None = None) -> str | None:
-    token = _get_stored_token(logger)
-    if token and _validate_token(logger, token):
-        user_info = _get_user_info(logger, token)
-        if user_info:
-            logger.info(f"Authenticated as: {user_info.get('name', 'Unknown')} ({user_info.get('email', 'Unknown')})")
-        return token
-    if token:
-        logger.warning("Stored token is invalid, need to re-authenticate")
-        _clear_token(logger)
-
-    if not username:
-        print("\nEcoTaxa Authentication Required")
-        username = input("username (email): ").strip()
-    if not username:
-        raiseCytoError("EcoTaxa username is required", logger)
-
-    if not password:
-        password = getpass.getpass("password: ")
-    if not password:
-        raiseCytoError("EcoTaxa password is required", logger)
-
-    token = _login(logger, username, password)
-    if token is None:
-        raiseCytoError("Authentication failed. Please check your EcoTaxa username and password.", logger)
-
-    if _store_token(logger, token):
-        logger.info("Authentication token stored securely in system keyring")
-
-    user_info = _get_user_info(logger, token)
-    if user_info:
-        logger.info(f"Authenticated as: {user_info.get('name', 'Unknown')} ({user_info.get('email', 'Unknown')})")
-
-    return token
+from cytoprocess import ecotaxa
+from cytoprocess.logging import log_command_start, log_command_success, setup_logging
+from cytoprocess.project import list_sample_assets, path_to_sample_asset
+from cytoprocess.utils import raiseCytoError
 
 
 def _get_prediction_files(project: Path, sample_filter: str | None) -> list[Path]:
-    work_dir = project / "work"
-    if not work_dir.exists():
-        return []
-
-    prediction_files = sorted(work_dir.glob("*_image_predictions_top3.parquet"))
-    if not prediction_files:
-        prediction_files = sorted(work_dir.glob("*_image_predictions.parquet"))
-
+    prediction_files = sorted(project.glob("work/*/predictions.parquet"))
     if sample_filter:
-        expected_top3 = work_dir / f"{sample_filter}_image_predictions_top3.parquet"
-        expected_top1 = work_dir / f"{sample_filter}_image_predictions.parquet"
-        expected = expected_top3 if expected_top3.exists() else expected_top1
-        prediction_files = [path for path in prediction_files if path == expected]
-
+        prediction_files = [path for path in prediction_files if path.parent.name == sample_filter]
     return prediction_files
 
 
@@ -413,32 +150,34 @@ def run(ctx, project, username: str | None = None, password: str | None = None):
 
     ecotaxa_config = config.get("ecotaxa", {}) or {}
     project_id = ecotaxa_config.get("project_id")
+    eco_url = ecotaxa_config.get("url", "https://ecotaxa.obs-vlfr.fr")
+    api_url = f"{eco_url}/api"
     if not project_id:
         raiseCytoError(
             f"EcoTaxa project_id missing from '{config_path}'\n"
             "Edit the file to set 'ecotaxa: project_id'\n"
             "You can find your EcoTaxa numeric project ID in the table at\n"
-            "  https://ecotaxa.obs-vlfr.fr/prj",
+            f"  {eco_url}/prj",
             logger,
         )
 
     prediction_files = _get_prediction_files(project, sample_filter)
     if not prediction_files:
         raiseCytoError(
-            f"No '*_image_predictions[_top3].parquet' files found in '{project / 'work'}', "
+            f"No prediction parquet files found in '{project / 'work'}', "
             f"run 'cytoprocess predict_images {project}' first.",
             logger,
         )
 
-    token = authenticate(logger, username=username, password=password)
+    token = ecotaxa.authenticate(api_url, username=username, password=password, logger=logger)
     if token is None:
         raiseCytoError("Authentication failed, cannot proceed with EcoTaxa update", logger)
 
-    project_info = _get_project_info(logger, token, int(project_id))
+    project_info = ecotaxa.get_project_info(api_url, int(project_id), token, logger)
     project_name = project_info.get("title", "Unknown") if project_info else "Unknown"
     logger.info(f"Updating EcoTaxa project '{project_name}' [{project_id}]")
 
-    project_samples = _get_project_samples(logger, token, int(project_id))
+    project_samples = ecotaxa.get_project_samples(api_url, int(project_id), token, logger)
     if not project_samples:
         raiseCytoError("No samples could be retrieved from EcoTaxa for this project.", logger)
 
@@ -449,11 +188,7 @@ def run(ctx, project, username: str | None = None, password: str | None = None):
     total_missing_objects = 0
 
     for prediction_file in prediction_files:
-        sample_id = (
-            prediction_file.stem
-            .replace("_image_predictions_top3", "")
-            .replace("_image_predictions", "")
-        )
+        sample_id = prediction_file.parent.name
         logger.info(f"'{sample_id}'")
 
         sample_ecotaxa_id = project_samples.get(sample_id)
@@ -468,7 +203,36 @@ def run(ctx, project, username: str | None = None, password: str | None = None):
             continue
 
         logger.info(f"  Reading {len(predictions_df)} predicted object(s)")
-        object_map = _get_sample_object_map(logger, token, int(project_id), sample_ecotaxa_id)
+        object_map: dict[str, int] = {}
+        window_start = 0
+        while True:
+            payload = requests.post(
+                f"{api_url}/object_set/{int(project_id)}/query",
+                headers={"Authorization": f"Bearer {token}"},
+                params={
+                    "fields": "obj.orig_id",
+                    "window_start": window_start,
+                    "window_size": 1000,
+                },
+                json={"samples": str(sample_ecotaxa_id)},
+                timeout=120,
+            )
+            if payload.status_code != 200:
+                raiseCytoError(f"Failed to query EcoTaxa objects: {payload.text}", logger)
+
+            response_payload = payload.json()
+            object_ids = response_payload.get("object_ids", [])
+            details = response_payload.get("details", [])
+            total_ids = int(response_payload.get("total_ids", 0) or 0)
+            if not object_ids:
+                break
+            for object_id, detail in zip(object_ids, details):
+                if detail and detail[0] is not None:
+                    object_map[str(detail[0])] = int(object_id)
+            window_start += len(object_ids)
+            if window_start >= total_ids:
+                break
+
         if not object_map:
             logger.warning("  No objects found in EcoTaxa for this sample, skipping")
             continue
@@ -487,7 +251,38 @@ def run(ctx, project, username: str | None = None, password: str | None = None):
             continue
 
         logger.info(f"  Updating {len(target_ids)} EcoTaxa object(s)")
-        updated = _classify_objects(logger, token, target_ids, batch_classifications, batch_scores)
+        updated = 0
+        total = len(target_ids)
+        for start in range(0, total, 1000):
+            end = start + 1000
+            batch_target_ids = target_ids[start:end]
+            batch_classifications = batch_classifications[start:end]
+            batch_scores = batch_scores[start:end]
+            batch_number = (start // 1000) + 1
+            batch_end = min(end, total)
+            logger.info(
+                f"    Batch {batch_number}: sending {len(batch_target_ids)} object(s) "
+                f"({start + 1}-{batch_end}/{total})"
+            )
+            response = requests.post(
+                f"{api_url}/object_set/classify_auto_multiple",
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "target_ids": batch_target_ids,
+                    "classifications": batch_classifications,
+                    "scores": batch_scores,
+                    "keep_log": True,
+                },
+                timeout=120,
+            )
+            if response.status_code != 200:
+                raiseCytoError(f"Failed to update EcoTaxa object metadata: {response.text}", logger)
+            batch_updated = int(response.json() or 0)
+            updated += batch_updated
+            logger.info(
+                f"    Batch {batch_number}: updated {batch_updated} object(s) "
+                f"(total {updated}/{total})"
+            )
         total_updated += updated
         logger.info(f"  > Updated {updated} object(s)")
 
@@ -497,4 +292,5 @@ def run(ctx, project, username: str | None = None, password: str | None = None):
         f"{total_missing_samples} sample(s) missing in EcoTaxa, "
         f"{total_missing_objects} object(s) not matched"
     )
+    logger.info(f"Your data is at {eco_url}/prj/{project_id}")
     log_command_success(logger, "Overwrite EcoTaxa metadata")

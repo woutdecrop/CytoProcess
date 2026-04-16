@@ -1,8 +1,12 @@
 import logging
-from pathlib import Path
 import shutil
-from cytoprocess.utils import setup_logging, log_command_start, log_command_success, raiseCytoError
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
+import click
+
+from cytoprocess.logging import setup_logging, log_command_start, log_command_success
+from cytoprocess.utils import raiseCytoError
 
 def _remove_directory(directory: Path, logger: logging.Logger) -> bool:
     """Remove a directory and all its contents.
@@ -17,7 +21,7 @@ def _remove_directory(directory: Path, logger: logging.Logger) -> bool:
     
     logger.debug(f"Checking if '{directory}' exists")
     if not directory.exists():
-        logger.info(f"Directory does not exist: '{directory}'")
+        logger.warning(f"Directory does not exist: '{directory}'")
         return False
     
     try:
@@ -28,23 +32,33 @@ def _remove_directory(directory: Path, logger: logging.Logger) -> bool:
         raiseCytoError(f"Error removing directory: {e}", logger)
 
 
-def run(ctx, project):
+def run(ctx: click.Context, project: Path, older_than: int = None):
+    # Housekeeping for the command
     logger = setup_logging(command="cleanup", project=project, debug=ctx.obj["debug"])
-
     log_command_start(logger, "Cleaning up intermediate files", project)
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
     
-    # Remove directory containing .json files
-    # (they are large and can be reconverted from .cyz files)
-    converted_dir = Path(project) / "converted"
-    _remove_directory(converted_dir, logger)
-
     # Remove intermediate storage for metadata
-    work_dir = Path(project) / "work"
+    work_dir = project / "work"
     _remove_directory(work_dir, logger)
 
-    # Remove directory with individual images
-    images_dir = Path(project) / "images"
-    _remove_directory(images_dir, logger)
+    # Remove old log files
+    log_dir = project / "logs"
+    if log_dir.exists() and older_than is not None:
+        cutoff_date = date.today() - timedelta(days=older_than)
+        
+        nb_removed = 0
+        for log_file in log_dir.glob("*_cytoprocess.log"):
+            try:
+                date_str = log_file.stem.split("_")[0]
+                file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                
+                if file_date < cutoff_date:
+                    logger.debug(f"Removing log file '{log_file}'")
+                    log_file.unlink()
+                    nb_removed += 1
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Could not parse date from log file '{log_file}': {e}")
+        logger.info(f"Successfully removed {nb_removed} log files older than {older_than} days")
   
     log_command_success(logger, "Cleanup")

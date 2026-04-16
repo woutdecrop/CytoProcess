@@ -1,17 +1,33 @@
+import json
+import logging
 import os
 import platform
+import shutil
 import subprocess
-import urllib.request
-import json
 import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
-from cytoprocess.utils import log_command_start, log_command_success, setup_logging, raiseCytoError
+
+import click
+
+from cytoprocess.logging import setup_logging, log_command_start, log_command_success
+from cytoprocess.utils import raiseCytoError
 
 
 def _get_or_create_bin_dir() -> Path:
     """Get (and create if necessary) the directory for storing executables."""
-    bin_dir = Path.home() / ".bin"
+    if platform.system() == "Windows":
+        # Prefer a per-user application data location on Windows
+        appdata_root = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if appdata_root:
+            bin_dir = Path(appdata_root) / "Cyz2Json" / "bin"
+        else:
+            # Fallback if env vars are unavailable
+            bin_dir = Path.home() / "AppData" / "Local" / "Cyz2Json" / "bin"
+    else:
+        # For Unix-like systems, use ~/.bin
+        bin_dir = Path.home() / ".bin"
 
     # create the directory if it doesn't exist
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -25,7 +41,20 @@ def _get_executable_name() -> str:
     return executable_name
 
 
-def _get_release_file_name(logger) -> str:
+def _get_preferred_executable_path() -> Path:
+    """Return the executable path we should actually invoke on this platform."""
+    bin_dir = _get_or_create_bin_dir()
+    executable_name = _get_executable_name()
+
+    if platform.system() == "Windows":
+        # On Windows the executable depends on sibling DLLs in the extracted folder.
+        # Running the copied launcher from bin/ can fail if those files are not next to it.
+        return bin_dir / "cyz2json_dlls" / executable_name
+
+    return bin_dir / executable_name
+
+
+def _get_release_file_name(logger: logging.Logger) -> str:
     """Get the appropriate release file name based on OS."""
     system = platform.system().lower()
     
@@ -42,7 +71,7 @@ def _get_release_file_name(logger) -> str:
     return release_file
 
 
-def _download_latest_release(logger) -> str:
+def _download_latest_release(logger: logging.Logger) -> str:
     """Download the latest release of cyz2json and return the path to the executable."""
     # 1. Fetch latest release info from GitHub API
     logger.info("Fetching latest cyz2json release info from GitHub")
@@ -87,8 +116,13 @@ def _download_latest_release(logger) -> str:
         urllib.request.urlretrieve(download_url, tmp_path)
         logger.debug(f"Downloaded to {tmp_path}")
         
+        # clean up the existing cyz2json_dir if it exists
+        if cyz2json_dir.exists():
+            logger.debug(f"Removing existing cyz2json directory at {cyz2json_dir}")
+            shutil.rmtree(cyz2json_dir)
+                    
         # extract the zip file
-        cyz2json_dir.mkdir(parents=True, exist_ok=True)
+        cyz2json_dir.mkdir(parents=True)
         logger.debug(f"Extracting to {cyz2json_dir}")
         with zipfile.ZipFile(tmp_path, 'r') as zip_ref:
             zip_ref.extractall(cyz2json_dir)
@@ -97,74 +131,62 @@ def _download_latest_release(logger) -> str:
         logger.debug(f"Removing temporary file {tmp_path}")
         os.remove(tmp_path)
        
-        # create symlink in bin_dir
-        # define symkink source and name
+        # Define the extracted executable and the optional launcher path exposed to the rest of the app
         executable_path = cyz2json_dir / _get_executable_name()
-        symlink_path = bin_dir / _get_executable_name()
+        launcher_path = bin_dir / _get_executable_name()
         
-        # make the exectuable actually executable
+        # make the executable actually executable
         logger.debug(f"Setting execute permissions for {executable_path}")
         os.chmod(executable_path, 0o755)
 
-        # remove existing symlink if it exists
-        if symlink_path.exists() or symlink_path.is_symlink():
-            logger.debug(f"Removing existing symlink at {symlink_path}")
-            symlink_path.unlink()
-        
-        # create symlink
-        logger.debug(f"Creating symlink at {symlink_path} -> {executable_path}")
-        os.symlink(executable_path, symlink_path)
+        # remove existing launcher if it exists
+        if launcher_path.exists() or launcher_path.is_symlink():
+            logger.debug(f"Removing existing launcher at {launcher_path}")
+            launcher_path.unlink()
 
-        logger.info(f"Successfully installed cyz2json to {symlink_path}")
+        if platform.system() == "Windows":
+            # On Windows we invoke the executable directly from the extracted folder
+            # so it can find its sibling DLLs.
+            logger.debug(f"Using extracted executable directly at {executable_path}")
+        else:
+            logger.debug(f"Creating symlink at {launcher_path} -> {executable_path}")
+            os.symlink(executable_path, launcher_path)
+            logger.debug(f"Successfully installed cyz2json to {launcher_path}")
     
     except Exception as e:
         raiseCytoError(f"Failed to download and install cyz2json: {e}", logger)
     
-    return str(symlink_path)
+    if platform.system() == "Windows":
+        logger.debug(f"Successfully installed cyz2json to {executable_path}")
+        return str(executable_path)
+
+    return str(launcher_path)
 
 
-def _check_or_get_cyz2json(logger) -> str:
-    """Get the path to the cyz2json executable, using local install if present."""
-    print("using wouts version")
-    # 1️⃣ Check local project install first
-    local_install = Path(__file__).parent / "cyz2json_install" / _get_executable_name()
-    if local_install.exists():
-        logger.info(f"Using local cyz2json at {local_install}")
-        return str(local_install)
-    
-    # 2️⃣ Fallback to original .bin directory
-    bin_dir = _get_or_create_bin_dir()
-    executable_name = _get_executable_name()
-    executable_path = bin_dir / executable_name
+def _check_or_get_cyz2json(logger: logging.Logger, force: bool = False) -> str:
+    """Get the path to the cyz2json executable, downloading if necessary."""
+    executable_path = _get_preferred_executable_path()
+
+    if force:
+        logger.info("Downloading latest cyz2json release")
+        return _download_latest_release(logger)
     
     if not executable_path.exists():
-        logger.info(f"Cyz2Json not found at {executable_path}, downloading")
+        logger.info(f"cyz2json not found at {executable_path}, downloading")
         return _download_latest_release(logger)
     
     logger.debug(f"Using existing cyz2json at {executable_path}")
     return str(executable_path)
 
-# def _check_or_get_cyz2json(logger) -> str:
-#     """Get the path to the cyz2json executable, downloading if necessary."""
-#     bin_dir = _get_or_create_bin_dir()
-#     executable_name = _get_executable_name()
-#     executable_path = bin_dir / executable_name
-    
-#     if not executable_path.exists():
-#         logger.info(f"Cyz2Json not found at {executable_path}, downloading")
-#         return _download_latest_release(logger)
-    
-#     logger.debug(f"Using existing cyz2json at {executable_path}")
-#     return str(executable_path)
 
-
-def run(ctx):
+def run(ctx: click.Context, force: bool = False):
     logger = setup_logging(command="install", project=None, debug=ctx.obj["debug"])
     log_command_start(logger, "Installing cyz2json", project=None)
     try:
-        path = _check_or_get_cyz2json(logger)
+        path = _check_or_get_cyz2json(force=force, logger=logger)
         result = subprocess.run([path, '--version'], check=True, capture_output=True, text=True)
-        logger.info(f"cyz2json available at {path}, at version {result.stdout.strip()}")
+        cyz2json_version = result.stdout.strip().removeprefix('Cyz2Json-')
+        logger.info(f"cyz2json installed at {path}, at version {cyz2json_version}")
     except Exception as e:
         raiseCytoError(f"Failed to install cyz2json: {e}", logger)
         raise

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
+import csv
 import mimetypes
+import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,18 +10,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import local
 
+import click
 import pandas as pd
 import requests
 
-from cytoprocess.utils import ensure_project_dir, log_command_start, log_command_success, raiseCytoError, setup_logging
-import csv
+from cytoprocess.logging import log_command_start, log_command_success, setup_logging
+from cytoprocess.project import list_sample_assets, path_to_sample_asset
+from cytoprocess.utils import raiseCytoError
 
-predict_url_remote = "http://127.0.0.1:5000/v2/models/planktonclas/predict/?ckpt_name=final_model.h5"
-docker_container_name = "phyto_classifier_container_cyto"
-docker_image = "wdecrop/cyto-plankton-classifier "
-health_url = "http://127.0.0.1:5000/api"
+PREDICT_URL_REMOTE = "http://127.0.0.1:5000/v2/models/planktonclas/predict/?ckpt_name=final_model.h5"
+DOCKER_CONTAINER_NAME = "phyto_classifier_container_cyto"
+DOCKER_IMAGE = "wdecrop/cyto-plankton-classifier"
+HEALTH_URL = "http://127.0.0.1:5000/api"
+CLASSIFIER_NAME = "cyto_classifier"
+CLASSIFIER_EMAIL = "wout.decrop@vliz.be"
 
-_thread_local = local()
+_THREAD_LOCAL = local()
+_CATEGORY_MAPPING: dict[str, int] | None = None
 
 
 def _run_command(cmd: str) -> str:
@@ -32,19 +38,19 @@ def _run_command(cmd: str) -> str:
 
 def _check_api_available() -> bool:
     try:
-        response = requests.get(health_url, timeout=3)
+        response = requests.get(HEALTH_URL, timeout=3)
         return response.status_code == 200
     except requests.RequestException:
         return False
 
 
 def _start_container(logger) -> None:
-    status = _run_command(f'docker inspect -f "{{{{.State.Status}}}}" {docker_container_name}')
+    status = _run_command(f'docker inspect -f "{{{{.State.Status}}}}" {DOCKER_CONTAINER_NAME}')
 
     if not status:
         logger.info("  Creating prediction container")
         subprocess.check_call(
-            f"docker run -d -p 5000:5000 --name {docker_container_name} {docker_image}",
+            f"docker run -d -p 5000:5000 --name {DOCKER_CONTAINER_NAME} {DOCKER_IMAGE}",
             shell=True,
         )
         return
@@ -53,18 +59,15 @@ def _start_container(logger) -> None:
         logger.debug("Prediction container already running")
         return
 
-    # if status == "exited":
-    #     logger.info("  Starting prediction container")
-    #     subprocess.check_call(f"docker start {docker_container_name}", shell=True)
-    #     return
     if status in ["exited", "created"]:
         logger.info("  Starting prediction container")
-        subprocess.check_call(f"docker start {docker_container_name}", shell=True)
+        subprocess.check_call(f"docker start {DOCKER_CONTAINER_NAME}", shell=True)
         return
-    raise RuntimeError(f"Docker container '{docker_container_name}' is in unexpected state '{status}'")
+
+    raise RuntimeError(f"Docker container '{DOCKER_CONTAINER_NAME}' is in unexpected state '{status}'")
 
 
-def _wait_for_api(logger, timeout_sec: int = 120) -> None:
+def _wait_for_api(timeout_sec: int = 120) -> None:
     start_time = time.time()
     while time.time() - start_time <= timeout_sec:
         if _check_api_available():
@@ -77,14 +80,14 @@ def _ensure_predictor_ready(logger) -> None:
     if _check_api_available():
         return
     _start_container(logger)
-    _wait_for_api(logger)
+    _wait_for_api()
 
 
 def _get_session() -> requests.Session:
-    session = getattr(_thread_local, "session", None)
+    session = getattr(_THREAD_LOCAL, "session", None)
     if session is None:
         session = requests.Session()
-        _thread_local.session = session
+        _THREAD_LOCAL.session = session
     return session
 
 
@@ -104,7 +107,36 @@ def _as_list(value):
     return [value]
 
 
-def _map_prediction_label(label, category_mapping: dict) -> tuple[str | None, int | None]:
+def _mapping_file() -> Path:
+    return Path(__file__).resolve().parents[2] / "ecotaxa-classes.tsv"
+
+
+def _load_category_mapping(tsv_path: Path) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+
+    with tsv_path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        for row in reader:
+            label = row["object_annotation_category"].strip().strip('"')
+            category_id = row["object_annotation_category_id"].strip().strip('"')
+            if not label or not category_id or category_id == "[t]":
+                continue
+            try:
+                mapping[label] = int(category_id)
+            except ValueError:
+                continue
+
+    return mapping
+
+
+def _get_category_mapping() -> dict[str, int]:
+    global _CATEGORY_MAPPING
+    if _CATEGORY_MAPPING is None:
+        _CATEGORY_MAPPING = _load_category_mapping(_mapping_file())
+    return _CATEGORY_MAPPING
+
+
+def _map_prediction_label(label, category_mapping: dict[str, int]) -> tuple[str | None, int | None]:
     if isinstance(label, bytes):
         label = label.decode()
 
@@ -113,27 +145,23 @@ def _map_prediction_label(label, category_mapping: dict) -> tuple[str | None, in
 
     label = str(label)
     category_id = category_mapping.get(label)
-    # print(f"Trying direct mapping for predicted label '{label}'")
 
     if category_id is None:
         alt_label = label.replace("_", "<")
         category_id = category_mapping.get(alt_label)
-        # print(f"Trying alternative label '{alt_label}' for original label '{label}'")
         if category_id is not None:
             label = alt_label
 
     if category_id is None:
         alt_label = label.replace("_", "<").replace(">", " ")
         category_id = category_mapping.get(alt_label)
-        # print(f"Trying alternative label '{alt_label}' for original label '{label}'")
         if category_id is not None:
             label = alt_label
 
-    # print(f"Mapped predicted label '{label}' to category_id {category_id}")
     return label, category_id
 
 
-def _extract_top_predictions(payload: dict, category_mapping: dict, top_n: int = 3) -> list[dict]:
+def _extract_top_predictions(payload: dict, category_mapping: dict[str, int], top_n: int = 3) -> list[dict]:
     predictions = payload.get("predictions", payload)
     labels = []
     probabilities = []
@@ -166,38 +194,15 @@ def _extract_top_predictions(payload: dict, category_mapping: dict, top_n: int =
 
     return top_predictions
 
-def load_category_mapping(tsv_path: Path) -> dict[str, int]:
-    mapping = {}
-
-    with tsv_path.open(newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-
-        for row in reader:
-            label = row["object_annotation_category"].strip().strip('"')
-            category_id = row["object_annotation_category_id"].strip().strip('"')
-
-            # ✅ skip invalid rows like [t]
-            if not label or not category_id or category_id == "[t]":
-                continue
-
-            try:
-                mapping[label] = int(category_id)
-            except ValueError:
-                # optional: log or print bad rows
-                print(f"Skipping invalid row: {row}")
-                continue
-
-    return mapping
-category_mapping = load_category_mapping(Path("cytoprocess\\ecotaxa-classes.tsv"))
 
 def _predict_image(image_file: Path, sample_id: str, annotation_date: str, annotation_time: str) -> dict:
     session = _get_session()
     mime_type = mimetypes.guess_type(image_file.name)[0] or "application/octet-stream"
 
-    with image_file.open("rb") as fh:
+    with image_file.open("rb") as handle:
         response = session.post(
-            predict_url_remote,
-            files={"image": (image_file.name, fh, mime_type)},
+            PREDICT_URL_REMOTE,
+            files={"image": (image_file.name, handle, mime_type)},
             timeout=60,
         )
     response.raise_for_status()
@@ -207,62 +212,41 @@ def _predict_image(image_file: Path, sample_id: str, annotation_date: str, annot
         message = payload.get("message", "Unknown prediction API error")
         raise ValueError(f"Prediction API rejected '{image_file.name}': {message}")
 
-    top_predictions = _extract_top_predictions(payload, category_mapping, top_n=3)
+    top_predictions = _extract_top_predictions(payload, _get_category_mapping(), top_n=3)
     if not top_predictions:
         raise ValueError(f"No prediction label returned for '{image_file.name}'")
 
     top_prediction = top_predictions[0]
-    primary_row = {
+    object_name = image_file.stem.replace("_img", "")
+    object_id = f"{sample_id}_{object_name}"
+
+    return {
         "sample_id": sample_id,
-        "object_id": f"{sample_id}_{image_file.stem}",
+        "object_id": object_id,
         "object_annotation_date": annotation_date,
         "object_annotation_time": annotation_time,
         "object_annotation_category": top_prediction["label"],
         "object_annotation_category_id": top_prediction["category_id"],
-        "object_annotation_person_name": "cyto_classifier",
-        "object_annotation_person_email": "wout.decrop@vliz.be",
+        "object_annotation_categories": [prediction["label"] for prediction in top_predictions],
+        "object_annotation_category_ids": [prediction["category_id"] for prediction in top_predictions],
+        "object_annotation_probabilities": [prediction["probability"] for prediction in top_predictions],
+        "object_annotation_person_name": CLASSIFIER_NAME,
+        "object_annotation_person_email": CLASSIFIER_EMAIL,
         "object_annotation_status": "predicted",
         "object_annotation_probability": top_prediction["probability"],
     }
 
-    top3_row = {
-        "sample_id": sample_id,
-        "object_id": f"{sample_id}_{image_file.stem}",
-        "object_annotation_date": annotation_date,
-        "object_annotation_time": annotation_time,
-        "object_annotation_categories": [prediction["label"] for prediction in top_predictions],
-        "object_annotation_category_ids": [prediction["category_id"] for prediction in top_predictions],
-        "object_annotation_probabilities": [prediction["probability"] for prediction in top_predictions],
-        "object_annotation_person_name": "cyto_classifier",
-        "object_annotation_person_email": "wout.decrop@vliz.be",
-        "object_annotation_status": "predicted",
-    }
 
-    return {"primary": primary_row, "top3": top3_row}
-
-
-def run(ctx, project, force: bool = False):
+def run(ctx: click.Context, project: Path, force: bool = False):
     logger = setup_logging(command="predict_images", project=project, debug=ctx.obj["debug"])
-
     log_command_start(logger, "Predicting image classes", project)
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
+    if force:
+        logger.debug("Force flag enabled, existing prediction files will be overwritten")
 
-    project = Path(project)
-    images_dir = project / "images"
-    if not images_dir.exists():
-        raiseCytoError(f"Images directory not found: '{images_dir}'. Run extract_images first.", logger)
-
-    sample_dirs = [d for d in images_dir.iterdir() if d.is_dir()]
+    sample_dirs = list_sample_assets(project, "dir", logger, samples_mask=ctx.obj["sample"])
     if not sample_dirs:
-        raiseCytoError(f"No sample directories found in '{images_dir}', run 'cytoprocess extract_images {project}' first.", logger)
-
-    sample = getattr(ctx, "obj", {}).get("sample")
-    if sample:
-        sample_dirs = [d for d in sample_dirs if d.name == sample]
-        if not sample_dirs:
-            raiseCytoError(f"No image directory found for sample '{sample}', run 'cytoprocess --sample \"{sample}\" extract_images {project}' first.", logger)
-
-    work_dir = ensure_project_dir(project, "work")
+        return
 
     try:
         _ensure_predictor_ready(logger)
@@ -274,18 +258,22 @@ def run(ctx, project, force: bool = False):
 
     for sample_dir in sample_dirs:
         sample_id = sample_dir.name
-        output_file = work_dir / f"{sample_id}_image_predictions.parquet"
-        top3_output_file = work_dir / f"{sample_id}_image_predictions_top3.parquet"
+        images_dir = project / path_to_sample_asset(sample_id, "images", logger)
+        output_file = project / path_to_sample_asset(sample_id, "predictions", logger)
 
         logger.info(f"'{sample_id}'")
 
-        if output_file.exists() and top3_output_file.exists() and not force:
-            logger.info("  Skipping, output file already exists (use --force to overwrite)")
+        if output_file.exists() and not force:
+            logger.info("  Skipping, predictions file already exists (use --force to overwrite)")
             continue
 
-        image_files = sorted(sample_dir.glob("*.jpg"))
+        if not images_dir.exists():
+            logger.warning(f"  Images not found, run `cytoprocess --sample '{sample_id}' extract_images {project}`")
+            continue
+
+        image_files = sorted(images_dir.glob("*_img.jpg"))
         if not image_files:
-            logger.warning(f"No JPG images found in '{sample_dir}', run 'cytoprocess --sample \"{sample_id}\" extract_images {project}' first.")
+            logger.warning(f"  No extracted images found in '{images_dir}', skipping")
             continue
 
         logger.info(f"  {len(image_files)} images to predict")
@@ -307,13 +295,10 @@ def run(ctx, project, force: bool = False):
         except Exception as exc:
             raiseCytoError(f"Error predicting sample '{sample_id}': {exc}", logger)
 
-        df = pd.DataFrame(result["primary"] for result in results).sort_values("object_id").reset_index(drop=True)
-        df_top3 = pd.DataFrame(result["top3"] for result in results).sort_values("object_id").reset_index(drop=True)
-
+        df = pd.DataFrame(results).sort_values("object_id").reset_index(drop=True)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(output_file, index=False)
-        df_top3.to_parquet(top3_output_file, index=False)
 
-        logger.info(f"  Saved {df.shape[0]} top-1 predictions to\n  '{output_file}'")
-        logger.info(f"  Saved {df_top3.shape[0]} top-3 predictions to\n  '{top3_output_file}'")
+        logger.info(f"  Saved {df.shape[0]} predictions to\n  '{output_file}'")
 
     log_command_success(logger, "Predict images")

@@ -1,9 +1,13 @@
-import yaml
-import pandas as pd
 from pathlib import Path
-from cytoprocess.utils import get_sample_files, ensure_project_dir, get_json_section, setup_logging, log_command_start, log_command_success, raiseCytoError
+
+import click
 import ijson
 import numpy as np
+import pandas as pd
+
+from cytoprocess.logging import setup_logging, log_command_start, log_command_success
+from cytoprocess.project import list_sample_assets, path_to_sample_asset
+from cytoprocess.utils import get_json_section, load_config, raiseCytoError
 
 def _get_parameters_structure(parameters):
     """
@@ -46,7 +50,7 @@ def _get_parameters_structure(parameters):
     return paths
 
 
-def _get_parameter_value(parameters, path):
+def _get_parameter_value(parameters, path: str):
     """
     Retrieve a value from a particle's parameters list given a path.
     
@@ -87,17 +91,20 @@ def _get_parameter_value(parameters, path):
     return None
 
 
-def run(ctx, project, list_keys=False, force=False):
+def run(ctx: click.Context, project: Path, list_keys=False, force=False):
+    # Housekeeping for the command
     logger = setup_logging(command="extract_cyto", project=project, debug=ctx.obj["debug"])
-
     log_command_start(logger, "Extracting cytometric features", project)
+    if force:
+       logger.debug("Force flag enabled: existing cytometric features files will be overwritten")
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
-    
-    # Get JSON files from converted directory
-    json_files = get_sample_files(project, logger, kind="json", ctx=ctx)
+
+
+    # Get JSON files one converted
+    json_files = list_sample_assets(project, kind="json",
+                                    logger=logger, samples_mask=ctx.obj["sample"])
     if not json_files:
         return
-    
     logger.info(f"Processing {len(json_files)} .json file(s)")
     
     if list_keys:
@@ -106,7 +113,7 @@ def run(ctx, project, list_keys=False, force=False):
         
         paths = []
         for json_file in json_files:
-            logger.debug(f"Listing parameter paths from {json_file.name}")
+            logger.debug(f"Listing parameter paths from {json_file}")
             try:
                 with open(json_file, 'rb') as f:
                     # Use ijson to navigate to the particles array and get the first item
@@ -114,19 +121,19 @@ def run(ctx, project, list_keys=False, force=False):
                     first_particle = next(parser, None)
                     
                 if first_particle is None:
-                       logger.warning(f"No particles found in '{json_file.name}'")
-                       continue
+                    logger.warning(f"No particles found in '{json_file.parents[0].name}'")
+                    continue
                     
                 parameters = first_particle.get('parameters', [])
                 
                 if parameters is None or len(parameters) == 0:
-                    logger.warning(f"No parameters found in first particle of '{json_file.name}'")
+                    logger.warning(f"No parameters found in first particle of '{json_file.parents[0].name}'")
                     continue
                                 
                 paths.extend(_get_parameters_structure(parameters))
                                 
             except Exception as e:
-                raiseCytoError(f"Error reading '{json_file.name}': {e}", logger)
+                raiseCytoError(f"Error reading '{json_file}': {e}", logger)
         
         if not paths:
             raiseCytoError("No parameter paths found in any .json file", logger)
@@ -136,8 +143,7 @@ def run(ctx, project, list_keys=False, force=False):
         logger.info(f"Found {len(paths)} parameter paths")
         
         # Write paths to file
-        meta_dir = ensure_project_dir(project, "meta")
-        paths_file = meta_dir / "available_cytometry_features.txt"
+        paths_file = project / "config" / "available_cytometric_features.txt"
         with open(paths_file, 'w') as f:
             for path in paths:
                 f.write(f"{path}\n")
@@ -146,32 +152,26 @@ def run(ctx, project, list_keys=False, force=False):
     
     else:
         # Normal operation: extract cytometric features based on config.yaml
-
-        config_file = Path(project) / "config" / "config.yaml"
-        logger.info(f"Read selected cytometric features list from '{config_file}'")
-        
-        if not config_file.exists():
-            raiseCytoError(f"Configuration file not found: '{config_file}', run 'cytoprocess create {project}' again.", logger)
-        
-        with open(config_file, 'r') as f:
-            config = yaml.safe_load(f)
+        config = load_config(project, logger)
         
         # Get the 'object' section from config
         object_config = config.get('object')
         if not object_config or not isinstance(object_config, dict):
-            raiseCytoError(f"No 'object' section found in '{config_file}'. Configuration file must contain an 'object' section with cytometric feature mappings.", logger)
+            raiseCytoError(f"No 'object' section found. The configuration file must contain an 'object' section with cytometric feature mappings.", logger)
         
         logger.debug(f"Found {len(object_config)} mappings in 'object' section")
         
         # Ensure work directory exists, to store output files
-        work_dir = ensure_project_dir(project, "work")
+        work_dir = project / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
         
         # Process each JSON file and write one Parquet per sample
         for json_file in json_files:
-            sample_id = json_file.stem
-            output_file = work_dir / f"{sample_id}_cytometric_features.parquet"
+            # Get sample_id from file name
+            sample_id = json_file.parents[0].name
+            output_file = project / path_to_sample_asset(sample_id, 'cytometric_features', logger)
 
-            logger.info(f"'{json_file.stem}'")
+            logger.info(f"'{sample_id}'")
            
             # Skip if output file exists and force is not set
             if output_file.exists() and not force:
@@ -184,6 +184,8 @@ def run(ctx, project, list_keys=False, force=False):
                 
                 if particles_data is None or len(particles_data) == 0:
                     logger.warning(f"No particles found in '{json_file.name}'")
+                    # Create an empty parquet file to avoid reprocessing this file in the future
+                    pd.DataFrame().to_parquet(output_file, index=False)
                     continue
                 
                 logger.debug(f"Found {len(particles_data)} particles in '{json_file.name}'")
@@ -205,13 +207,13 @@ def run(ctx, project, list_keys=False, force=False):
                                   not s.get("imaged_volume") == 'NaN']
                     # Compute relevant quantifies
                     for s in sets_stats:
-                        imaging_ratio = np.float32(s['images']) / np.float32(s['count'])
-                        analysed_volume = np.float32(s['imaged_volume']) / imaging_ratio
+                        imaging_ratio = s['images'] / s['count']
+                        analysed_volume = s['imaged_volume'] / imaging_ratio
                         sets_stats_df = pd.concat([
                             set_stats_df,
                             pd.DataFrame({'name': s['name'],
                                           'acq_imaging_ratio': imaging_ratio,
-                                          'acq_imaged_volume_uL': np.float32(s['imaged_volume']),
+                                          'acq_imaged_volume_uL': s['imaged_volume'],
                                           'acq_analysed_volume_uL': analysed_volume}, index=[0])])
                 # Rename 'name' to its actual meaning
                 sets_stats_df = sets_stats_df.rename(columns={'name': 'acq_id'})
@@ -223,11 +225,11 @@ def run(ctx, project, list_keys=False, force=False):
                 multiple_regions = []
 
                 # Process each particle
+                first_particle = True
                 for particle in particles_data:
                     # Only process particles with images
                     if not particle.get('hasImage', False):
                         continue
-                    # TODO add an --all option to also extract particles without images, which can be useful for some applications (e.g. classification from flow cytometry data only)
 
                     particle_idx = particle.get('particleId')
 
@@ -266,14 +268,18 @@ def run(ctx, project, list_keys=False, force=False):
                         value = _get_parameter_value(parameters, json_path)
                         
                         if value is None:
-                            logger.debug(f"Path '{json_path}' not found in particle {particle_idx} of '{json_file.name}'")
-                        if value == 'NaN':
-                            logger.debug(f"Path '{json_path}' has value 'NaN' for particle {particle_idx} of '{json_file.name}'")
-                            value = np.nan
-                        
-                        row[full_column_name] = value
+                            # Display the debug message only for the first particle, to avoid flooding
+                            # the logs since all particles should be missing the same variables
+                            if first_particle:
+                                logger.debug(f"Path '{json_path}' not found in particles of '{json_file.name}'")
+                        else:
+                            if value == 'NaN':
+                                logger.debug(f"Path '{json_path}' has value 'NaN' for particle {particle_idx} of '{json_file.name}'")
+                                value = np.nan
+                            row[full_column_name] = value
                     
                     rows.append(row)
+                    first_particle = False
                 
                 if not rows:
                     logger.warning(f"No particle data extracted from '{json_file.name}'")
