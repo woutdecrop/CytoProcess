@@ -1,14 +1,37 @@
 import tempfile
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+import pandas as pd
 import yaml
+from click import ClickException
 
 from cytoprocess import ecotaxa
 from cytoprocess.logging import setup_logging, log_command_start, log_command_success
 from cytoprocess.project import check_project_integrity, list_sample_assets
 from cytoprocess.utils import format_file_size, raiseCytoError
+
+
+def _pipeline_failures_master_log_path(project: Path) -> Path:
+    return project / "logs" / "pipeline_failures_master.csv"
+
+
+def _append_pipeline_failure(project: Path, stage: str, sample_id: str, status: str, reason: str, details: str, object_id: str = "") -> None:
+    path = _pipeline_failures_master_log_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "event_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "stage": stage,
+        "sample_id": sample_id,
+        "object_id": object_id,
+        "status": status,
+        "reason": reason,
+        "details": details,
+    }
+    write_header = not path.exists()
+    pd.DataFrame([row]).to_csv(path, mode="a", header=write_header, index=False)
 
 
 def _extract_tsv_in_new_zip(zip_path: Path, logger) -> Path | None:
@@ -30,6 +53,22 @@ def _extract_tsv_in_new_zip(zip_path: Path, logger) -> Path | None:
     with zipfile.ZipFile(new_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(tmp_dir / tsv_name, tsv_name)
     return new_zip_path
+
+
+def _ensure_zip_is_current(zip_path: Path, logger) -> None:
+    """Refuse to upload a stale zip when a newer TSV exists beside it."""
+    tsv_path = zip_path.with_name(f"ecotaxa_{zip_path.stem}.tsv")
+    if not tsv_path.exists():
+        return
+
+    zip_mtime = zip_path.stat().st_mtime
+    tsv_mtime = tsv_path.stat().st_mtime
+    if tsv_mtime > zip_mtime:
+        raiseCytoError(
+            f"  ZIP file '{zip_path.name}' is older than '{tsv_path.name}'. "
+            "Re-run `cytoprocess prepare` to rebuild the archive before uploading.",
+            logger,
+        )
 
 
 def run(ctx: click.Context, project: Path, username: str | None = None, password: str | None = None, update: bool = False):
@@ -89,59 +128,75 @@ def run(ctx: click.Context, project: Path, username: str | None = None, password
         sample_id = zip_path.stem.replace("ecotaxa_", "")
         logger.info(f"'{sample_id}'")
 
-        # Skip if sample already exists (unless updating)
-        if (sample_id in existing_samples) and not update:
-            logger.info(f"  Skipping, sample already exists on EcoTaxa")
-            continue
+        try:
+            # Skip if sample already exists (unless updating)
+            if (sample_id in existing_samples) and not update:
+                logger.info(f"  Skipping, sample already exists on EcoTaxa")
+                continue
 
-        # If we only update, we need to extract the TSV and re-zip it
-        # because the API expects a zip file but we only want to upload the updated TSV
-        if update:
-            zip_path = _extract_tsv_in_new_zip(zip_path, logger)
-        
-        # Upload via TUS (resumable, with live progress)
-        logger.info(f"  Uploading '{zip_path.name}' (" + ("metadata only; " if update else "") + f"{format_file_size(zip_path.stat().st_size)})...")
-        upload_result = ecotaxa.upload_file_tus(api_url, token, zip_path, logger=logger)
-        logger.debug(f"Upload result: {upload_result}")
-        
-        if upload_result.get("errors"):
-            for error in upload_result["errors"]:
-                logger.error(f"  Error: {error}")
+            # If we only update, we need to extract the TSV and re-zip it
+            # because the API expects a zip file but we only want to upload the updated TSV
+            if update:
+                zip_path = _extract_tsv_in_new_zip(zip_path, logger)
+            else:
+                _ensure_zip_is_current(zip_path, logger)
+
+            # Upload via TUS (resumable, with live progress)
+            logger.info(f"  Uploading '{zip_path.name}' (" + ("metadata only; " if update else "") + f"{format_file_size(zip_path.stat().st_size)})...")
+            upload_result = ecotaxa.upload_file_tus(api_url, token, zip_path, logger=logger)
+            logger.debug(f"Upload result: {upload_result}")
+
+            if upload_result.get("errors"):
+                for error in upload_result["errors"]:
+                    logger.error(f"  Error: {error}")
+                continue
+
+            server_path = upload_result.get("server_path")
+            if not server_path:
+                logger.warning(f"  No server path returned, upload may have failed")
+                continue
+
+            logger.debug(f"Uploaded to server path: '{server_path}'")
+            logger.info(f"  ✔︎ Upload completed")
+
+            logger.debug(f"Importing {sample_id}")
+            server_directory = Path(server_path).stem
+            import_result = ecotaxa.import_file(api_url, project_id, token, server_directory,
+                                                update_mode="Yes" if update else "", logger=logger)
+            logger.debug(f"Import result: {import_result}")
+
+            if import_result.get("errors"):
+                for error in import_result["errors"]:
+                    logger.error(f"  Error: {error}")
+                    _append_pipeline_failure(project, "import", sample_id, "failed", "import_error", str(error))
+                continue
+
+            job_id = import_result.get("job_id", 0)
+            if job_id <= 0:
+                logger.warning("No job ID returned, import may have failed")
+                _append_pipeline_failure(project, "import", sample_id, "failed", "missing_job_id", "No job ID returned from EcoTaxa import")
+                continue
+
+            logger.info(f"  Import started (job ID: {job_id}), monitoring progress...")
+
+            success = ecotaxa.monitor_job(api_url, job_id, token, logger=logger)
+            if success:
+                logger.info(f"  ✔︎ Import completed")
+            else:
+                logger.warning(f"  ✗ Import failed or requires manual intervention")
+                _append_pipeline_failure(
+                    project,
+                    "import",
+                    sample_id,
+                    "failed",
+                    "job_monitor_failed",
+                    f"EcoTaxa import job {job_id} failed or could not be monitored",
+                )
+        except ClickException as exc:
+            logger.error(f"  {exc.message}")
+            _append_pipeline_failure(project, "upload", sample_id, "failed", "click_exception", exc.message)
+            logger.warning("  Continuing with the next sample")
             continue
-        
-        server_path = upload_result.get("server_path")
-        if not server_path:
-            logger.warning(f"  No server path returned, upload may have failed")
-            continue
-        
-        logger.debug(f"Uploaded to server path: '{server_path}'")
-        logger.info(f"  ✔︎ Upload completed")
-        
-        # Import
-        logger.debug(f"Importing {sample_id}")
-        server_directory = Path(server_path).stem
-        import_result = ecotaxa.import_file(api_url, project_id, token, server_directory,
-                                            update_mode="Yes" if update else "", logger=logger)
-        logger.debug(f"Import result: {import_result}")
-        
-        if import_result.get("errors"):
-            for error in import_result["errors"]:
-                logger.error(f"  Error: {error}")
-            continue
-        
-        job_id = import_result.get("job_id", 0)
-        if job_id <= 0:
-            logger.warning("No job ID returned, import may have failed")
-            continue
-        
-        logger.info(f"  Import started (job ID: {job_id}), monitoring progress...")
-        
-        # Monitor job until completion
-        success = ecotaxa.monitor_job(api_url, job_id, token, logger=logger)
-        if success:
-            logger.info(f"  ✔︎ Import completed")
-        else:
-            logger.warning(f"  ✗ Import failed or requires manual intervention")
 
     logger.info(f"Your data is at {eco_url}/prj/{project_id}")
     log_command_success(logger, "Upload")

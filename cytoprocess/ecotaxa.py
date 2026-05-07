@@ -12,6 +12,13 @@ import requests
 from cytoprocess.utils import format_file_size, raiseCytoError
 
 KEYRING_SERVICE = "cytoprocess-ecotaxa"
+TUS_CREATE_TIMEOUT_SEC = 30
+TUS_PATCH_TIMEOUT_SEC = 120
+TUS_OFFSET_TIMEOUT_SEC = 30
+TUS_MAX_RETRIES = 5
+TUS_RETRY_BACKOFF_SEC = 5
+JOB_STATUS_MAX_RETRIES = 5
+JOB_STATUS_RETRY_BACKOFF_SEC = 5
 
 
 def _get_stored_token(logger: logging.Logger) -> str | None:
@@ -243,6 +250,93 @@ def _list_user_files(api_url: str, token: str, sub_path: str = "", logger: loggi
         return None
 
 
+def _tus_create_upload(api_url: str, token: str, file_size: int, filename_b64: str, logger: logging.Logger | None) -> str:
+    create_headers = {
+        "Authorization": f"Bearer {token}",
+        "Tus-Resumable": "1.0.0",
+        "Upload-Length": str(file_size),
+        "Upload-Metadata": f"filename {filename_b64}",
+    }
+    response = None
+    last_error = None
+    for attempt in range(1, TUS_MAX_RETRIES + 1):
+        try:
+            response = requests.post(
+                f"{api_url}/user_files/upload/",
+                headers=create_headers,
+                timeout=TUS_CREATE_TIMEOUT_SEC,
+            )
+        except requests.RequestException as e:
+            last_error = e
+            if attempt == TUS_MAX_RETRIES:
+                raiseCytoError(f"TUS upload creation request failed: {e}", logger)
+            if logger:
+                logger.warning(
+                    "  TUS upload creation request failed (attempt %s/%s): %s",
+                    attempt,
+                    TUS_MAX_RETRIES,
+                    e,
+                )
+            time.sleep(TUS_RETRY_BACKOFF_SEC * attempt)
+            continue
+
+        if response.status_code == 201:
+            break
+
+        if response.status_code >= 500 and attempt < TUS_MAX_RETRIES:
+            if logger:
+                logger.warning(
+                    "  TUS upload creation failed with HTTP %s (attempt %s/%s), retrying",
+                    response.status_code,
+                    attempt,
+                    TUS_MAX_RETRIES,
+                )
+            time.sleep(TUS_RETRY_BACKOFF_SEC * attempt)
+            continue
+
+        raiseCytoError(f"TUS upload creation failed (HTTP {response.status_code}): {response.text}", logger)
+    else:
+        raiseCytoError(
+            f"TUS upload creation request failed: {last_error}" if last_error else "TUS upload creation failed",
+            logger,
+        )
+
+    location = response.headers.get("Location")
+    if not location:
+        raiseCytoError("TUS upload creation response is missing the Location header", logger)
+
+    if not location.startswith("http"):
+        parsed = urlparse(api_url)
+        return f"{parsed.scheme}://{parsed.netloc}{location}"
+    return location
+
+
+def _tus_get_offset(upload_url: str, token: str, logger: logging.Logger | None) -> int:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Tus-Resumable": "1.0.0",
+    }
+    try:
+        response = requests.head(upload_url, headers=headers, timeout=TUS_OFFSET_TIMEOUT_SEC)
+    except requests.RequestException as e:
+        raiseCytoError(f"Unable to query TUS upload offset: {e}", logger)
+
+    if response.status_code != 200:
+        raiseCytoError(
+            f"Unable to query TUS upload offset (HTTP {response.status_code}): {response.text}",
+            logger,
+        )
+
+    offset_header = response.headers.get("Upload-Offset")
+    if offset_header is None:
+        raiseCytoError("TUS offset response is missing the Upload-Offset header", logger)
+
+    try:
+        return int(offset_header)
+    except ValueError:
+        raiseCytoError(f"Invalid TUS Upload-Offset value '{offset_header}'", logger)
+
+
 def upload_file_tus(
     api_url: str,
     token: str,
@@ -273,61 +367,76 @@ def upload_file_tus(
 
     logger.debug(f"TUS upload: creating upload resource for '{zip_path.name}' ({file_size} bytes)")
 
-    # Step 1: Create the upload resource
-    create_headers = {
-        "Authorization": f"Bearer {token}",
-        "Tus-Resumable": "1.0.0",
-        "Upload-Length": str(file_size),
-        "Upload-Metadata": f"filename {filename_b64}",
-    }
-    try:
-        response = requests.post(
-            f"{api_url}/user_files/upload/",
-            headers=create_headers,
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        raiseCytoError(f"TUS upload creation request failed: {e}", logger)
-
-    if response.status_code != 201:
-        raiseCytoError(f"TUS upload creation failed (HTTP {response.status_code}): {response.text}", logger)
-
-    location = response.headers.get("Location")
-    if not location:
-        raiseCytoError("TUS upload creation response is missing the Location header", logger)
-
-    # Make the URL absolute when the server returns a relative path
-    if not location.startswith("http"):
-        parsed = urlparse(api_url)
-        upload_url = f"{parsed.scheme}://{parsed.netloc}{location}"
-    else:
-        upload_url = location
+    upload_url = _tus_create_upload(api_url, token, file_size, filename_b64, logger)
 
     logger.debug(f"TUS upload resource created: {upload_url}")
 
     # Step 2: Upload in chunks, reporting progress
     offset = 0
-    try:
-        with open(zip_path, "rb") as f:
-            while offset < file_size:
-                chunk = f.read(chunk_size)
-                if not chunk:
+    with open(zip_path, "rb") as f:
+        while offset < file_size:
+            f.seek(offset)
+            chunk = f.read(chunk_size)
+            if not chunk:
+                break
+
+            patch_headers = {
+                "Authorization": f"Bearer {token}",
+                "Tus-Resumable": "1.0.0",
+                "Content-Type": "application/offset+octet-stream",
+                "Content-Length": str(len(chunk)),
+                "Upload-Offset": str(offset),
+            }
+
+            for attempt in range(1, TUS_MAX_RETRIES + 1):
+                try:
+                    resp = requests.patch(
+                        upload_url,
+                        headers=patch_headers,
+                        data=chunk,
+                        timeout=TUS_PATCH_TIMEOUT_SEC,
+                    )
+                except requests.RequestException as e:
+                    if attempt == TUS_MAX_RETRIES:
+                        sys.stdout.write("\n")
+                        raiseCytoError(f"TUS upload failed: {e}", logger)
+                    if logger:
+                        logger.warning(
+                            "  TUS chunk upload failed at offset %s (attempt %s/%s): %s",
+                            offset,
+                            attempt,
+                            TUS_MAX_RETRIES,
+                            e,
+                        )
+                    time.sleep(TUS_RETRY_BACKOFF_SEC * attempt)
+                    offset = _tus_get_offset(upload_url, token, logger)
                     break
 
-                patch_headers = {
-                    "Authorization": f"Bearer {token}",
-                    "Tus-Resumable": "1.0.0",
-                    "Content-Type": "application/offset+octet-stream",
-                    "Content-Length": str(len(chunk)),
-                    "Upload-Offset": str(offset),
-                }
+                if resp.status_code == 409:
+                    offset = _tus_get_offset(upload_url, token, logger)
+                    if logger:
+                        logger.warning(f"  TUS server offset changed, resuming at {format_file_size(offset)}")
+                    break
 
-                resp = requests.patch(
-                    upload_url,
-                    headers=patch_headers,
-                    data=chunk,
-                    timeout=120,
-                )
+                if resp.status_code >= 500:
+                    if attempt == TUS_MAX_RETRIES:
+                        sys.stdout.write("\n")
+                        raiseCytoError(
+                            f"TUS chunk upload failed at offset {offset} "
+                            f"(HTTP {resp.status_code}): {resp.text}",
+                            logger,
+                        )
+                    if logger:
+                        logger.warning(
+                            "  TUS chunk upload failed at offset %s with HTTP %s (attempt %s/%s), retrying",
+                            offset,
+                            resp.status_code,
+                            attempt,
+                            TUS_MAX_RETRIES,
+                        )
+                    time.sleep(TUS_RETRY_BACKOFF_SEC * attempt)
+                    offset = _tus_get_offset(upload_url, token, logger)
+                    break
 
                 if resp.status_code != 204:
                     sys.stdout.write("\n")
@@ -338,17 +447,16 @@ def upload_file_tus(
                     )
 
                 offset = int(resp.headers.get("Upload-Offset", offset + len(chunk)))
-
                 pct = int(100 * offset / file_size) if file_size else 100
                 sys.stdout.write(
                     f"\r  Upload: {pct}% "
                     f"({format_file_size(offset)} / {format_file_size(file_size)})"
                 )
                 sys.stdout.flush()
-
-    except requests.RequestException as e:
-        sys.stdout.write("\n")
-        raiseCytoError(f"TUS upload failed: {e}", logger)
+                break
+            else:
+                sys.stdout.write("\n")
+                raiseCytoError("TUS upload failed after exhausting all retry attempts", logger)
 
     sys.stdout.write("\n")
 
@@ -442,6 +550,24 @@ def get_job(api_url: str, job_id: int, token: str, logger: logging.Logger) -> di
         return None
 
 
+def _get_job_with_retries(api_url: str, job_id: int, token: str, logger: logging.Logger | None) -> dict | None:
+    for attempt in range(1, JOB_STATUS_MAX_RETRIES + 1):
+        job_info = get_job(api_url, job_id, token, logger)
+        if job_info is not None:
+            return job_info
+        if attempt == JOB_STATUS_MAX_RETRIES:
+            return None
+        if logger:
+            logger.warning(
+                "  Failed to get job status for job %s (attempt %s/%s), retrying",
+                job_id,
+                attempt,
+                JOB_STATUS_MAX_RETRIES,
+            )
+        time.sleep(JOB_STATUS_RETRY_BACKOFF_SEC * attempt)
+    return None
+
+
 def monitor_job(api_url: str, job_id: int, token: str, poll_interval: float = 2.0, logger: logging.Logger = None) -> bool:
     """
     Monitor a job until it completes.
@@ -458,7 +584,7 @@ def monitor_job(api_url: str, job_id: int, token: str, poll_interval: float = 2.
     """
     last_progress = -1
     while True:
-        job_info = get_job(api_url, job_id, token, logger)
+        job_info = _get_job_with_retries(api_url, job_id, token, logger)
         if job_info is None:
             logger.error("Failed to get job status")
             return False

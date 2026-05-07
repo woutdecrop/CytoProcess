@@ -330,8 +330,12 @@ def _process_single_image(image: dict, background_img: np.ndarray,
 
         # Extract features from the particle
         features = _extract_features(img_mask, img)
+        segmentation_status = "segmented"
+        warning_msg = None
         if features is None:
-            return (None, False, f"  No object detected on image {particle_id}")
+            segmentation_status = "failed"
+            warning_msg = f"  No object detected on image {particle_id}; keeping raw image with a blank fallback mask"
+            img_mask = np.zeros_like(img_mask, dtype=bool)
 
         # Write the image and mask from the worker process to avoid having to return them
         output_file = images_dir / f"{particle_id}_img.jpg"
@@ -345,14 +349,16 @@ def _process_single_image(image: dict, background_img: np.ndarray,
         # Create a DataFrame row with identifiers and features
         row = {
             'sample_id': sample_id,
-            'object_id': f"{sample_id}_{particle_id}"
+            'object_id': f"{sample_id}_{particle_id}",
+            'object_segmentation_status': segmentation_status,
         }
         
         # Add features, with the object_ prefix
-        for key, value in features.items():
-            row[f"object_{key}"] = value[0]
+        if features is not None:
+            for key, value in features.items():
+                row[f"object_{key}"] = value[0]
 
-        return (row, True, None)
+        return (row, True, warning_msg)
         
     except Exception as e:
         return (None, False, str(e))
@@ -449,7 +455,8 @@ def run(ctx: click.Context, project: Path, force=False, max_cores=None):
                 if not success:
                     logger.warning(error_msg)
                     continue
-                
+                if error_msg:
+                    logger.warning(error_msg)
                 rows.append(row)
                 
                 image_count += 1

@@ -39,21 +39,38 @@ def cli(ctx, debug, sample):
 
 @cli.command(name="install")
 @click.option("--force", "-f", is_flag=True, default=False, help="Force (re)installation of the latest release even if Cyz2Json already exists.")
+@click.option("--predict-model", is_flag=True, default=False, help="Also download and install the local FlowCytoClassifier model for local prediction.")
+@click.option("--zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific prediction model version.")
 @click.pass_context
-def install(ctx, force):
+def install(ctx, force, predict_model, zenodo_version):
     """
     Install dependency: Cyz2Json converter.
     
     This tool is required to convert .cyz files in a readable .json format. It is distributed from https://github.com/OBAMANEXT/cyz2json. This command installs the latest release automatically.
     """
     from cytoprocess.commands import install
-    install.run(ctx, force=force)
+    install.run(
+        ctx,
+        force=force,
+        predict_model=predict_model,
+        zenodo_version=zenodo_version,
+        project=Path.cwd(),
+    )
 
 
 @cli.command(name="create")
 @click.argument("project")
 @click.pass_context
 def create(ctx, project):
+    """Create a new CytoProcess project directory."""
+    from cytoprocess.commands import create
+    create.run(ctx, project=Path(project).expanduser())
+
+
+@cli.command(name="init")
+@click.argument("project")
+@click.pass_context
+def init_project(ctx, project):
     """Create a new CytoProcess project directory."""
     from cytoprocess.commands import create
     create.run(ctx, project=Path(project).expanduser())
@@ -227,10 +244,22 @@ def all(ctx, project, force, n_poly, max_cores):
 @click.option("--force", "-f", is_flag=True, default=False, help="Force processing even if output already exists.")
 @click.option("--n-poly", "-n", default=10, help="Number of polynomial coefficients.")
 @click.option("--max-cores", "-m", type=int, default=15, help="Maximum number of CPU cores to use for parallel processing.")
+@click.option("--predict-backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
+@click.option("--predict-zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
 @click.option("--username", "-u", help="EcoTaxa email address.")
 @click.option("--password", "-p", help="EcoTaxa password.")
 @click.pass_context
-def all_predict(ctx, project, force, n_poly, max_cores, username, password):
+def all_predict(
+    ctx,
+    project,
+    force,
+    n_poly,
+    max_cores,
+    predict_backend,
+    predict_zenodo_version,
+    username,
+    password,
+):
     """Run the full pipeline with predictions; use this after `cytoprocess list`."""
     from cytoprocess.commands import (
         convert,
@@ -251,7 +280,13 @@ def all_predict(ctx, project, force, n_poly, max_cores, username, password):
     extract_cyto.run(ctx, project=project_path, list_keys=False, force=force)
     summarise_pulses.run(ctx, project=project_path, force=force, n_poly=n_poly, max_cores=max_cores)
     extract_images.run(ctx, project=project_path, force=force, max_cores=max_cores)
-    predict_images.run(ctx, project=project_path, force=force)
+    predict_images.run(
+        ctx,
+        project=project_path,
+        force=force,
+        backend=predict_backend,
+        zenodo_version=predict_zenodo_version,
+    )
     upload_all_predictions.run(ctx, project=project_path, username=username, password=password)
 
     logger.info("All processing and prediction steps completed successfully")
@@ -310,11 +345,43 @@ def predict(ctx, project, model, force):
 @cli.command(name="predict_images")
 @click.argument("project", type=click.Path(exists=True))
 @click.option("--force", "-f", is_flag=True, default=False, help="Force re-prediction even if output already exists.")
+@click.option("--backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
+@click.option("--zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
+@click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/models is preferred.")
+@click.option("--local-timestamp", default=None, help="Optional local model timestamp directory to use inside the selected model root.")
+@click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
 @click.pass_context
-def predict_images(ctx, project, force):
+def predict_images(ctx, project, force, backend, zenodo_version, local_model_root, local_timestamp, ckpt_name):
     """Run the bundled plankton classifier API against extracted images."""
     from cytoprocess.commands import predict_images
-    predict_images.run(ctx, project=Path(project).expanduser(), force=force)
+    predict_images.run(
+        ctx,
+        project=Path(project).expanduser(),
+        force=force,
+        backend=backend,
+        zenodo_version=zenodo_version,
+        local_model_root=local_model_root,
+        local_timestamp=local_timestamp,
+        ckpt_name=ckpt_name,
+    )
+
+
+@cli.command(name="train")
+@click.argument("project", type=click.Path(exists=True))
+@click.option("--export-tsv", default=None, type=click.Path(exists=True), hidden=True)
+@click.option("--force", "-f", is_flag=True, default=False, help="Rebuild the validated training image dataset before training.")
+@click.option("--config", "config_only", is_flag=True, default=False, help="Prepare the validated training dataset and planktonclas config, then stop so you can edit the config before training.")
+@click.pass_context
+def train(ctx, project, export_tsv, force, config_only):
+    """Reuse or fetch the latest EcoTaxa export, build /data/images_validated, and train a new project model."""
+    from cytoprocess.commands import train
+    train.run(
+        ctx,
+        project=Path(project).expanduser(),
+        export_tsv=Path(export_tsv).expanduser() if export_tsv else None,
+        force=force,
+        config_only=config_only,
+    )
 
 
 @cli.command(name="overwrite_ecotaxa")

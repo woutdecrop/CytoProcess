@@ -74,6 +74,7 @@ def setup_logging(command: str = None, project: Path = None, debug: bool = False
                 s = re.sub(r"[^\x00-\x7F]+", ">", s)
                 rec = copy.copy(record)
                 rec.msg = s
+                rec.args = ()
                 super().emit(rec)
 
         class CleanFileHandler(CleanupFormatter, logging.FileHandler):

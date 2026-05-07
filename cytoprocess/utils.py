@@ -6,7 +6,6 @@ from pathlib import Path
 import sys
 
 import click
-import ijson
 import yaml
 import numpy as np
 import matplotlib.pyplot as plt
@@ -29,6 +28,14 @@ def get_json_section(json_file: Path, key: str, logger: logging.Logger) -> dict 
         >>> images = get_json_section(Path('data.json'), 'images', logger)
     """
     logger.debug(f"Reading '{key}' section from {json_file.name}")
+    try:
+        import ijson
+    except ImportError as exc:
+        raiseCytoError(
+            "The optional dependency 'ijson' is required to read Cytosense JSON sections. "
+            "Install it in the active environment and retry.",
+            logger,
+        )
 
     with open(json_file, 'rb') as f:
         # Use ijson to stream only the specified part

@@ -1,5 +1,6 @@
 import logging
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
@@ -8,6 +9,15 @@ import pandas as pd
 from cytoprocess.logging import setup_logging, log_command_start, log_command_success
 from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
+
+
+class MissingEcoTaxaMediaError(RuntimeError):
+    """Raised when the EcoTaxa TSV would reference media files missing from disk."""
+
+    def __init__(self, sample_id: str, missing_files: list[str]):
+        self.sample_id = sample_id
+        self.missing_files = missing_files
+        super().__init__(sample_id)
 
 
 def _infer_ecotaxa_type(series: pd.Series) -> str:
@@ -114,6 +124,38 @@ def _ensure_complete_samples(project: Path, samples: list[str], logger: logging.
         raiseCytoError("Missing input for some samples. Please run the required extraction steps before preparing EcoTaxa files.", logger)
     
 
+def _recover_prepare_prerequisites(ctx: click.Context, project: Path, samples: list[str], logger: logging.Logger) -> None:
+    from cytoprocess.commands import extract_images, summarise_pulses
+
+    samples_needing_images: list[str] = []
+    samples_needing_pulses: list[str] = []
+
+    for sample_id in samples:
+        pulses_summaries_file = project / path_to_sample_asset(sample_id, 'pulses_summaries', logger)
+        pulses_plots_dir = project / path_to_sample_asset(sample_id, 'pulses_plots', logger)
+        if not pulses_summaries_file.exists() or not pulses_plots_dir.exists():
+            samples_needing_pulses.append(sample_id)
+
+        images_dir = project / path_to_sample_asset(sample_id, 'images', logger)
+        image_features_file = project / path_to_sample_asset(sample_id, 'image_features', logger)
+        if not images_dir.exists() or not image_features_file.exists():
+            samples_needing_images.append(sample_id)
+
+    previous_sample = ctx.obj.get("sample")
+    try:
+        for sample_id in samples_needing_pulses:
+            logger.warning(f"Auto-repair: re-running `summarise_pulses` for '{sample_id}'")
+            ctx.obj["sample"] = sample_id
+            summarise_pulses.run(ctx, project=project, n_poly=10, force=True, max_cores=None)
+
+        for sample_id in samples_needing_images:
+            logger.warning(f"Auto-repair: re-running `extract_images` for '{sample_id}'")
+            ctx.obj["sample"] = sample_id
+            extract_images.run(ctx, project=project, force=True, max_cores=None)
+    finally:
+        ctx.obj["sample"] = previous_sample
+
+
 def _merge_sample_data(
     project: Path,
     sample_id: str,
@@ -171,6 +213,152 @@ def _merge_sample_data(
     logger.debug(f"Found {len(df)} objects for sample '{sample_id}'")
     
     return df
+
+
+def _format_missing_media_message(sample_id: str, missing_files: list[str]) -> str:
+    preview = ", ".join(f"'{name}'" for name in missing_files[:10])
+    suffix = "" if len(missing_files) <= 10 else f", ... ({len(missing_files)} total)"
+    return (
+        f"Sample '{sample_id}' is missing {len(missing_files)} EcoTaxa media file(s): "
+        f"{preview}{suffix}. Re-run the extraction steps or remove the corresponding rows before preparing."
+    )
+
+
+def _skipped_objects_report_path(project: Path, sample_id: str, logger) -> Path:
+    sample_dir = project / path_to_sample_asset(sample_id, "dir", logger)
+    return sample_dir / "prepare_skipped_objects.csv"
+
+
+def _skipped_objects_master_log_path(project: Path) -> Path:
+    return project / "logs" / "prepare_skipped_objects_master.csv"
+
+
+def _pipeline_failures_master_log_path(project: Path) -> Path:
+    return project / "logs" / "pipeline_failures_master.csv"
+
+
+def _append_pipeline_failure_rows(project: Path, rows: list[dict]) -> None:
+    if not rows:
+        return
+    failure_log_path = _pipeline_failures_master_log_path(project)
+    failure_log_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not failure_log_path.exists()
+    pd.DataFrame(rows).to_csv(failure_log_path, mode="a", header=write_header, index=False)
+
+
+def _object_token_from_missing_file(file_name: str) -> str:
+    for suffix in ("_img.jpg", "_mask.png", "_pulses.png"):
+        if file_name.endswith(suffix):
+            return file_name[: -len(suffix)]
+    return Path(file_name).stem
+
+
+def _missing_files_by_object(sample_id: str, missing_files: list[str]) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    prefix = f"{sample_id}_"
+    for file_name in missing_files:
+        object_token = _object_token_from_missing_file(file_name)
+        object_id = f"{prefix}{object_token}"
+        grouped.setdefault(object_id, []).append(file_name)
+    return grouped
+
+
+def _write_skipped_objects_report(project: Path, sample_id: str, missing_files: list[str], logger) -> Path:
+    report_path = _skipped_objects_report_path(project, sample_id, logger)
+    grouped = _missing_files_by_object(sample_id, missing_files)
+    event_timestamp = datetime.now(timezone.utc).isoformat()
+    rows = []
+    for object_id, object_missing_files in sorted(grouped.items()):
+        object_token = object_id.replace(f"{sample_id}_", "", 1)
+        rows.append(
+            {
+                "event_timestamp_utc": event_timestamp,
+                "sample_id": sample_id,
+                "object_id": object_id,
+                "object_local_id": object_token,
+                "reason": "missing_media_after_regeneration",
+                "action": "dropped_from_prepare_export",
+                "missing_files": ";".join(sorted(object_missing_files)),
+            }
+        )
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_df = pd.DataFrame(rows)
+    report_df.to_csv(report_path, index=False)
+    _append_skipped_objects_master_log(project, report_df)
+    _append_pipeline_failure_rows(
+        project,
+        [
+            {
+                "event_timestamp_utc": row["event_timestamp_utc"],
+                "stage": "prepare",
+                "sample_id": row["sample_id"],
+                "object_id": row["object_id"],
+                "status": "dropped",
+                "reason": row["reason"],
+                "details": row["missing_files"],
+            }
+            for row in rows
+        ],
+    )
+    return report_path
+
+
+def _clear_skipped_objects_report(project: Path, sample_id: str, logger) -> None:
+    report_path = _skipped_objects_report_path(project, sample_id, logger)
+    report_path.unlink(missing_ok=True)
+
+
+def _drop_objects_with_missing_media(df: pd.DataFrame, sample_id: str, missing_files: list[str]) -> pd.DataFrame:
+    object_ids_to_drop = set(_missing_files_by_object(sample_id, missing_files))
+    if not object_ids_to_drop:
+        return df
+    return df[~df["object_id"].isin(object_ids_to_drop)].copy()
+
+
+def _append_skipped_objects_master_log(project: Path, report_df: pd.DataFrame) -> None:
+    master_log_path = _skipped_objects_master_log_path(project)
+    master_log_path.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not master_log_path.exists()
+    report_df.to_csv(master_log_path, mode="a", header=write_header, index=False)
+
+
+def _ensure_referenced_media_exists(project: Path, sample_id: str, df: pd.DataFrame, logger) -> None:
+    """Fail early when the EcoTaxa TSV would reference files missing from disk."""
+    images_dir = project / path_to_sample_asset(sample_id, 'images', logger)
+    pulses_dir = project / path_to_sample_asset(sample_id, 'pulses_plots', logger)
+
+    missing_files = []
+    for file_name in df["img_file_name"].dropna().astype(str).unique():
+        if file_name.endswith("_pulses.png"):
+            candidate = pulses_dir / file_name
+        else:
+            candidate = images_dir / file_name
+
+        if not candidate.exists():
+            missing_files.append(file_name)
+
+    if missing_files:
+        raise MissingEcoTaxaMediaError(sample_id, missing_files)
+
+
+def _repair_missing_media(ctx: click.Context, project: Path, sample_id: str, missing_files: list[str], logger) -> None:
+    from cytoprocess.commands import extract_images, summarise_pulses
+
+    needs_images = any(name.endswith(("_img.jpg", "_mask.png")) for name in missing_files)
+    needs_pulses = any(name.endswith("_pulses.png") for name in missing_files)
+
+    previous_sample = ctx.obj.get("sample")
+    ctx.obj["sample"] = sample_id
+    try:
+        if needs_pulses:
+            logger.warning(f"  Missing pulse plots detected, re-running `summarise_pulses` for '{sample_id}'")
+            summarise_pulses.run(ctx, project=project, n_poly=10, force=True, max_cores=None)
+        if needs_images:
+            logger.warning(f"  Missing images or masks detected, re-running `extract_images` for '{sample_id}'")
+            extract_images.run(ctx, project=project, force=True, max_cores=None)
+    finally:
+        ctx.obj["sample"] = previous_sample
 
 
 def _prepare_ecotaxa_tsv(df: pd.DataFrame, tsv_file: Path, logger) -> pd.DataFrame:
@@ -254,6 +442,7 @@ def _prepare_ecotaxa_tsv(df: pd.DataFrame, tsv_file: Path, logger) -> pd.DataFra
     df = pd.concat([df, df_masks, df_pulses], ignore_index=True)
     # Sort by object_id for consistent ordering
     df = df.sort_values(by="object_id").reset_index(drop=True)
+    _ensure_referenced_media_exists(tsv_file.parents[1], sample_id, df, logger)
     
     # Create the EcoTaxa .tsv file
     with open(tsv_file, 'w') as f:
@@ -326,6 +515,7 @@ def run(ctx: click.Context, project: Path, force=False, include_predictions: boo
         _warn_about_extra_samples(project, sample_ids, logger)
 
     # Check that all required input data/files exist for the target sample(s)
+    _recover_prepare_prerequisites(ctx, project, sample_ids, logger)
     _ensure_complete_samples(project, sample_ids, logger)
 
     # Prepare storage
@@ -363,7 +553,41 @@ def run(ctx: click.Context, project: Path, force=False, include_predictions: boo
             continue
 
         # Prepare TSV file
-        _prepare_ecotaxa_tsv(df, tsv_file, logger)
+        try:
+            _prepare_ecotaxa_tsv(df, tsv_file, logger)
+            _clear_skipped_objects_report(project, sample_id, logger)
+        except MissingEcoTaxaMediaError as exc:
+            logger.warning(f"  {_format_missing_media_message(exc.sample_id, exc.missing_files)}")
+            logger.warning("  Attempting to regenerate the missing media before retrying prepare")
+            _repair_missing_media(ctx, project, sample_id, exc.missing_files, logger)
+            df = _merge_sample_data(
+                project,
+                sample_id,
+                samples_meta_df,
+                logger,
+                include_predictions=include_predictions,
+            )
+            if df.empty:
+                logger.warning(f"No imaged particles for sample '{sample_id}' after media regeneration, skipping.")
+                continue
+            try:
+                _prepare_ecotaxa_tsv(df, tsv_file, logger)
+                _clear_skipped_objects_report(project, sample_id, logger)
+            except MissingEcoTaxaMediaError as retry_exc:
+                report_path = _write_skipped_objects_report(project, sample_id, retry_exc.missing_files, logger)
+                df = _drop_objects_with_missing_media(df, sample_id, retry_exc.missing_files)
+                if df.empty:
+                    raiseCytoError(
+                        f"After excluding unrecoverable objects, sample '{sample_id}' has no objects left for EcoTaxa. "
+                        f"Skipped objects are listed in '{report_path}'.",
+                        logger,
+                    )
+                skipped_count = len(_missing_files_by_object(sample_id, retry_exc.missing_files))
+                logger.warning(
+                    f"  Excluding {skipped_count} object(s) with unrecoverable media from sample '{sample_id}'. "
+                    f"Details saved to '{report_path}'."
+                )
+                _prepare_ecotaxa_tsv(df, tsv_file, logger)
         
         # Create zip file
         logger.info(f"  Assembling '{zip_file}'")
