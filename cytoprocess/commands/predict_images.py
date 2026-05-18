@@ -42,6 +42,9 @@ PREDICT_READ_TIMEOUT_SEC = 240
 DEFAULT_PREDICT_MAX_WORKERS = 4
 PREDICT_MAX_RETRIES = 3
 PREDICT_RETRY_BACKOFF_SEC = 5
+SEGMENTATION_STATUS_COLUMN = "object_segmentation_status"
+SEGMENTATION_FAILED_STATUS = "failed"
+SEGMENTATION_FALLBACK_LABEL = "out of focus"
 
 
 _THREAD_LOCAL = local()
@@ -324,6 +327,13 @@ def _extract_top_predictions(payload: dict, category_mapping: dict[str, int], to
     return top_predictions
 
 
+def _object_id_from_image_file(image_file: Path, sample_id: str) -> str:
+    object_name = image_file.stem
+    if object_name.endswith("_img"):
+        object_name = object_name[:-4]
+    return f"{sample_id}_{object_name}"
+
+
 def _build_prediction_row(
     image_file: Path,
     sample_id: str,
@@ -332,8 +342,7 @@ def _build_prediction_row(
     top_predictions: list[dict],
 ) -> dict:
     top_prediction = top_predictions[0]
-    object_name = image_file.stem.replace("_img", "")
-    object_id = f"{sample_id}_{object_name}"
+    object_id = _object_id_from_image_file(image_file, sample_id)
 
     return {
         "sample_id": sample_id,
@@ -350,6 +359,68 @@ def _build_prediction_row(
         "object_annotation_status": "predicted",
         "object_annotation_probability": top_prediction["probability"],
     }
+
+
+def _build_segmentation_fallback_row(
+    image_file: Path,
+    sample_id: str,
+    annotation_date: str,
+    annotation_time: str,
+) -> dict:
+    category_id = _get_category_mapping().get(SEGMENTATION_FALLBACK_LABEL)
+    return _build_prediction_row(
+        image_file,
+        sample_id,
+        annotation_date,
+        annotation_time,
+        [
+            {
+                "label": SEGMENTATION_FALLBACK_LABEL,
+                "category_id": category_id,
+                "probability": 1.0,
+            }
+        ],
+    )
+
+
+def _failed_segmentation_object_ids(image_features_file: Path, logger) -> set[str]:
+    if not image_features_file.exists():
+        return set()
+
+    try:
+        image_features = pd.read_parquet(image_features_file)
+    except Exception as exc:
+        logger.warning(f"  Could not read image features from '{image_features_file}', predicting all images: {exc}")
+        return set()
+
+    required_columns = {"object_id", SEGMENTATION_STATUS_COLUMN}
+    if image_features.empty or not required_columns.issubset(image_features.columns):
+        return set()
+
+    failed = image_features[SEGMENTATION_STATUS_COLUMN].astype(str).str.lower() == SEGMENTATION_FAILED_STATUS
+    return set(image_features.loc[failed, "object_id"].astype(str))
+
+
+def _split_images_by_segmentation_status(
+    image_files: list[Path],
+    sample_id: str,
+    image_features_file: Path,
+    logger,
+) -> tuple[list[Path], list[Path]]:
+    failed_object_ids = _failed_segmentation_object_ids(image_features_file, logger)
+    if not failed_object_ids:
+        return image_files, []
+
+    predict_image_files = []
+    segmentation_failed_files = []
+    for image_file in image_files:
+        object_id = _object_id_from_image_file(image_file, sample_id)
+        if object_id in failed_object_ids:
+            segmentation_failed_files.append(image_file)
+        else:
+            predict_image_files.append(image_file)
+
+    return predict_image_files, segmentation_failed_files
 
 
 def _predict_image(
@@ -807,6 +878,7 @@ def run(
     for sample_dir in sample_dirs:
         sample_id = sample_dir.name
         images_dir = project / path_to_sample_asset(sample_id, "images", logger)
+        image_features_file = project / path_to_sample_asset(sample_id, "image_features", logger)
         output_file = project / path_to_sample_asset(sample_id, "predictions", logger)
         failure_file = output_file.with_name("prediction_failures.csv")
 
@@ -825,58 +897,79 @@ def run(
             logger.warning(f"  No extracted images found in '{images_dir}', skipping")
             continue
 
-        logger.info(f"  {len(image_files)} images to predict")
         now = datetime.now(timezone.utc)
         annotation_date = now.strftime("%Y-%m-%d")
         annotation_time = now.strftime("%H:%M:%S")
 
-        progress = _make_progress(len(image_files), sample_id)
+        image_files_to_predict, segmentation_failed_files = _split_images_by_segmentation_status(
+            image_files,
+            sample_id,
+            image_features_file,
+            logger,
+        )
 
-        try:
-            if backend == "local":
-                logger.info(f"  Predicting locally in batches of up to {LOCAL_PREDICT_CHUNK_SIZE} image(s)")
-                results, failures = _predict_images_local(
-                    image_files,
-                    sample_id,
-                    annotation_date,
-                    annotation_time,
-                    predictor,
-                    logger,
-                    progress=progress,
-                )
-            else:
-                sample_workers = min(max_workers, len(image_files))
-                logger.info(f"  Using up to {sample_workers} parallel request(s)")
+        results = [
+            _build_segmentation_fallback_row(image_file, sample_id, annotation_date, annotation_time)
+            for image_file in segmentation_failed_files
+        ]
+        failures = []
 
-                results = []
-                failures = []
-                with ThreadPoolExecutor(max_workers=sample_workers) as executor:
-                    future_to_image = {
-                        executor.submit(
-                            _predict_image,
-                            image_file,
-                            sample_id,
-                            annotation_date,
-                            annotation_time,
-                            ckpt_name,
-                            logger,
-                        ): image_file
-                        for image_file in image_files
-                    }
+        if segmentation_failed_files:
+            logger.info(
+                f"  Marked {len(segmentation_failed_files)} image(s) as "
+                f"'{SEGMENTATION_FALLBACK_LABEL}' because segmentation failed"
+            )
 
-                    for future in as_completed(future_to_image):
-                        image_file = future_to_image[future]
-                        try:
-                            results.append(future.result())
-                        except Exception as exc:
-                            failures.append({"image_file": image_file.name, "error": str(exc)})
-                            logger.error(f"  Failed to predict '{image_file.name}': {exc}")
-                        finally:
-                            if progress is not None:
-                                progress.update(1)
-        finally:
-            if progress is not None:
-                progress.close()
+        if image_files_to_predict:
+            logger.info(f"  {len(image_files_to_predict)} images to predict")
+            progress = _make_progress(len(image_files_to_predict), sample_id)
+
+            try:
+                if backend == "local":
+                    logger.info(f"  Predicting locally in batches of up to {LOCAL_PREDICT_CHUNK_SIZE} image(s)")
+                    predicted_results, failures = _predict_images_local(
+                        image_files_to_predict,
+                        sample_id,
+                        annotation_date,
+                        annotation_time,
+                        predictor,
+                        logger,
+                        progress=progress,
+                    )
+                    results.extend(predicted_results)
+                else:
+                    sample_workers = min(max_workers, len(image_files_to_predict))
+                    logger.info(f"  Using up to {sample_workers} parallel request(s)")
+
+                    with ThreadPoolExecutor(max_workers=sample_workers) as executor:
+                        future_to_image = {
+                            executor.submit(
+                                _predict_image,
+                                image_file,
+                                sample_id,
+                                annotation_date,
+                                annotation_time,
+                                ckpt_name,
+                                logger,
+                            ): image_file
+                            for image_file in image_files_to_predict
+                        }
+
+                        for future in as_completed(future_to_image):
+                            image_file = future_to_image[future]
+                            try:
+                                results.append(future.result())
+                            except Exception as exc:
+                                failures.append({"image_file": image_file.name, "error": str(exc)})
+                                logger.error(f"  Failed to predict '{image_file.name}': {exc}")
+                            finally:
+                                if progress is not None:
+                                    progress.update(1)
+            finally:
+                if progress is not None:
+                    progress.close()
+        else:
+            logger.info("  No images need model prediction after segmentation-failure filtering")
 
         if results:
             df = pd.DataFrame(results).sort_values("object_id").reset_index(drop=True)

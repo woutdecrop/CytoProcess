@@ -92,13 +92,19 @@ List available samples and create the `meta/samples.csv` file
 cytoprocess list path/to/my_project
 ```
 
-Manually enter the required metadata (such as lon, lat, etc.) in the .csv file. You can add or remove columns as you see fit, you can use the option `--extra-fields` to determine which to add. The conventions follow those of EcoTaxa. Then performs all processing steps, for all samples, with default options 
+Manually enter the required metadata (such as lon, lat, etc.) in the .csv file. You can add or remove columns as you see fit, you can use the option `--extra-fields` to determine which to add. The conventions follow those of EcoTaxa. Then perform all processing steps, for all samples, with default options:
 
 ```bash
 cytoprocess all path/to/my_project
 ```
 
-If you want to know the details, or proceed manually, the steps behind `all` are:
+To run the same processing chain and also classify images, upload the samples, and sync predictions to EcoTaxa, use:
+
+```bash
+cytoprocess all_predict path/to/my_project
+```
+
+If you want to know the details, or proceed manually, the main steps are:
 
 ```bash
 # convert .cyz files into .json and create a placeholder its metadata
@@ -111,10 +117,8 @@ cytoprocess extract_cyto path/to/project
 # compute pulse shapes polynomial summaries for each imaged particle
 cytoprocess summarise_pulses path/to/project
 
-# extract images 
+# extract images and image features
 cytoprocess extract_images path/to/project
-# extract features from images
-cytoprocess compute_features path/to/project
 # predict image classes with the classifier API
 cytoprocess predict_images path/to/project
 
@@ -128,16 +132,35 @@ cytoprocess overwrite_ecotaxa path/to/project
 cytoprocess upload_all_predictions path/to/project
 ```
 
-### Prediction Upload Modes
+### Image extraction and segmentation fallback
 
-`predict_images` creates two prediction files in `work/` for each sample:
+`extract_images` uses the instrument background stored in the converted `.json` file to segment the object in each image. If a converted `.cyz` file contains no images, the sample is skipped cleanly: an empty `image_features.parquet` is written so the pipeline can continue without reprocessing that file forever.
 
-```bash
-<sample>_image_predictions.parquet
-<sample>_image_predictions_top3.parquet
+If an image exists but no object can be segmented from the background, CytoProcess keeps the object instead of dropping it. It writes the raw image, writes a blank fallback mask, and records:
+
+```text
+object_segmentation_status = failed
 ```
 
-The first file stores the top-1 prediction. The second stores the top 3 predicted labels and their scores, in ranking order.
+During `predict_images`, these failed-segmentation objects are not sent to the classifier model. They are written directly to `predictions.parquet` with the EcoTaxa label:
+
+```text
+object_annotation_category = out of focus
+object_annotation_category_id = 95471
+object_annotation_probability = 1.0
+```
+
+This keeps the object visible in EcoTaxa while making it explicit that the image could not be segmented reliably.
+
+### Prediction Upload Modes
+
+`predict_images` creates one prediction file in `work/` for each sample:
+
+```bash
+work/<sample>/predictions.parquet
+```
+
+This file stores the top predicted label and, when available, the top 3 predicted labels and their scores. Failed-segmentation objects are included in the same file as `out of focus` and are not classified by the model.
 
 Use the following commands depending on what is already present on EcoTaxa:
 
@@ -148,15 +171,15 @@ cytoprocess upload path/to/project
 # Apply predictions to objects that already exist in EcoTaxa
 cytoprocess overwrite_ecotaxa path/to/project
 
-# Rebuild ZIPs without prediction columns, upload them, then apply top-3 predictions
+# Rebuild ZIPs without prediction columns, upload them, then apply predictions
 cytoprocess upload_all_predictions path/to/project
 ```
 
 Notes:
 
 - `upload` imports the prepared EcoTaxa ZIP files.
-- `overwrite_ecotaxa` prefers the `*_image_predictions_top3.parquet` file when present and falls back to top-1 otherwise.
-- `upload_all_predictions` avoids importing top-1 predictions first; it uploads the sample data and then applies the top-3 predictions through the EcoTaxa API.
+- `overwrite_ecotaxa` reads `work/<sample>/predictions.parquet` and applies the stored predictions to objects that already exist in EcoTaxa.
+- `upload_all_predictions` uploads the sample data first, then applies all available predictions through the EcoTaxa API.
 - EcoTaxa records these as automatic predictions, so the history `Author` field remains empty (`-`) even though the model name is stored in the exported prediction metadata.
 
 

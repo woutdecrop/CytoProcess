@@ -161,9 +161,11 @@ def extract_images(ctx, project, force, max_cores):
     """
     Extract images from .json files.
     
-    Extract the images from the .json files and segments the main object in each. It stores a file for the image and for the mask, which are both uploaded to EcoTaxa.
+    Extract the images from the .json files and segment the main object in each. It stores a file for the image and for the mask, which are both uploaded to EcoTaxa.
 
     Some usual features are measured on the segmented object (area, perimeter, etc.), which are added to the features extracted from the pulse shapes and can be used for classification or biological interpretation.
+
+    If a sample contains no images, an empty image_features.parquet is written and the sample is skipped. If an image exists but no object can be segmented, the raw image is kept with a blank fallback mask and object_segmentation_status is set to "failed".
     """
     from cytoprocess.commands import extract_images
     extract_images.run(ctx, project=Path(project).expanduser(), force=force, max_cores=max_cores)
@@ -260,7 +262,7 @@ def all_predict(
     username,
     password,
 ):
-    """Run the full pipeline with predictions; use this after `cytoprocess list`."""
+    """Run processing, image prediction, upload, and EcoTaxa prediction sync."""
     from cytoprocess.commands import (
         convert,
         extract_meta,
@@ -352,7 +354,11 @@ def predict(ctx, project, model, force):
 @click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
 @click.pass_context
 def predict_images(ctx, project, force, backend, zenodo_version, local_model_root, local_timestamp, ckpt_name):
-    """Run the bundled plankton classifier API against extracted images."""
+    """
+    Run the bundled plankton classifier against extracted images.
+
+    Images marked with object_segmentation_status="failed" by extract_images are not sent to the model. They are written directly to predictions.parquet as "out of focus".
+    """
     from cytoprocess.commands import predict_images
     predict_images.run(
         ctx,

@@ -162,7 +162,7 @@ def run(ctx: click.Context, project: Path, n_poly=10, force=False, max_cores=Non
     available_cores = os.cpu_count() or 1
     n_cores = max(1, available_cores - 1)
     if max_cores is not None:
-        n_cores = min(n_cores, max_cores)
+        n_cores = max(1, min(n_cores, max_cores))
     logger.debug(f"Using {n_cores} core(s) for parallel processing")
 
 

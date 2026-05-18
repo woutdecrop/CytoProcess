@@ -376,7 +376,7 @@ def run(ctx: click.Context, project: Path, force=False, max_cores=None):
     available_cores = os.cpu_count() or 1
     n_cores = max(1, available_cores - 1)
     if max_cores is not None:
-        n_cores = min(n_cores, max_cores)
+        n_cores = max(1, min(n_cores, max_cores))
     logger.debug(f"Using {n_cores} core(s) for parallel processing")
 
 
@@ -412,8 +412,10 @@ def run(ctx: click.Context, project: Path, force=False, max_cores=None):
             
             # Extract the images section from the JSON file
             images = get_json_section(json_file, 'images', logger)
-            if images is None:
+            if not images:
                 logger.warning(f"No images found in '{json_file.name}'")
+                images_dir.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame(columns=["sample_id", "object_id"]).to_parquet(features_file, index=False)
                 continue
 
             # Get the background image from the JSON file
