@@ -84,7 +84,7 @@ def list_samples(ctx, project, extra_fields):
     """
     List samples and create/update meta/samples.csv.
     
-    Run this after creating the project and after adding new .cyz files to it. Once run, the file meta/samples.csv should be edited to add metadata for each sample. The default metadata fields are very relevant for EcoTaxa (location, time, etc.).
+    Run this after creating the project and after adding new .cyz files to it. If the sample filename contains a timestamp such as 2025-09-04_08h06 or 2025-09-04%2008h06, object_date and object_time are filled automatically. Once run, the file meta/samples.csv should be edited to add any remaining metadata for each sample. The default metadata fields are very relevant for EcoTaxa (location, time, etc.).
     """
     from cytoprocess.commands import list as list_cmd
     list_cmd.run(ctx, project=Path(project).expanduser(), extra_fields=extra_fields)

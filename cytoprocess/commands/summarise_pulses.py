@@ -197,6 +197,7 @@ def run(ctx: click.Context, project: Path, n_poly=10, force=False, max_cores=Non
             if particles_data is None or len(particles_data) == 0:
                 logger.warning(f"No particles found in '{json_file.name}'")
                 # Create an empty parquet file to avoid reprocessing this file in the future
+                pulses_plots_dir.mkdir(parents=True, exist_ok=True)
                 pd.DataFrame().to_parquet(output_file, index=False)
                 continue
             
@@ -215,6 +216,8 @@ def run(ctx: click.Context, project: Path, n_poly=10, force=False, max_cores=Non
             
             if not rows:
                 logger.warning(f"No pulse data extracted from '{json_file.name}'")
+                pulses_plots_dir.mkdir(parents=True, exist_ok=True)
+                pd.DataFrame().to_parquet(output_file, index=False)
                 continue
             
             # Create DataFrame and save to Parquet

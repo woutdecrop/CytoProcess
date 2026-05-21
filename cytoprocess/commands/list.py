@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import click
 import pandas as pd
@@ -8,6 +9,39 @@ from cytoprocess.project import list_sample_assets
 
 
 DEFAULT_EXTRA_FIELDS = "object_lon,object_lat,object_date,object_time,object_depth_min,object_depth_max,object_lon_end,object_lat_end"
+SAMPLE_DATETIME_RE = re.compile(r"(?P<date>\d{4}-\d{2}-\d{2})(?:%20|[_\s-]+)(?P<hour>\d{2})h(?P<minute>\d{2})")
+
+
+def _date_time_from_sample_id(sample_id: str) -> tuple[str | None, str | None]:
+    match = SAMPLE_DATETIME_RE.search(str(sample_id))
+    if not match:
+        return None, None
+    return match.group("date"), f"{match.group('hour')}:{match.group('minute')}:00"
+
+
+def _is_empty(value) -> bool:
+    return pd.isna(value) or str(value).strip() == ""
+
+
+def _fill_sample_date_time(samples: pd.DataFrame, logger) -> pd.DataFrame:
+    if "object_date" not in samples.columns and "object_time" not in samples.columns:
+        return samples
+
+    samples = samples.copy()
+    filled_date = 0
+    filled_time = 0
+    for index, sample_id in samples["sample_id"].items():
+        sample_date, sample_time = _date_time_from_sample_id(sample_id)
+        if sample_date and "object_date" in samples.columns and _is_empty(samples.at[index, "object_date"]):
+            samples.at[index, "object_date"] = sample_date
+            filled_date += 1
+        if sample_time and "object_time" in samples.columns and _is_empty(samples.at[index, "object_time"]):
+            samples.at[index, "object_time"] = sample_time
+            filled_time += 1
+
+    if filled_date or filled_time:
+        logger.info(f"Filled object_date for {filled_date} sample(s) and object_time for {filled_time} sample(s) from sample names")
+    return samples
 
 
 def run(ctx: click.Context, project: Path, extra_fields=DEFAULT_EXTRA_FIELDS):
@@ -54,6 +88,7 @@ def run(ctx: click.Context, project: Path, extra_fields=DEFAULT_EXTRA_FIELDS):
     })
     for field in extra_field_list:
         samples[field] = None
+    samples = _fill_sample_date_time(samples, logger)
     
     # Read existing metadata if it exists, otherwise create new
     update_meta_file = True
@@ -66,16 +101,19 @@ def run(ctx: click.Context, project: Path, extra_fields=DEFAULT_EXTRA_FIELDS):
         # If there are no new samples, just ensure extra fields are present
         if new_samples.empty:
             missing_fields = [f for f in extra_field_list if f not in existing_samples.columns]
+            final_df = existing_samples
             if not missing_fields:
-                logger.info(f"No new samples or fields to add to '{meta_file}'")
-                # In that case do not even rewrite the file
-                update_meta_file = False
+                final_df = _fill_sample_date_time(final_df, logger)
+                if final_df.equals(existing_samples):
+                    logger.info(f"No new samples or fields to add to '{meta_file}'")
+                    # In that case do not even rewrite the file
+                    update_meta_file = False
             else:
-                final_df = existing_samples
                 logger.info(f"Adding {len(missing_fields)} new field(s) to '{meta_file}'")
                 for field in missing_fields:
                     logger.debug(f"Adding new column '{field}' to '{meta_file}'")
                     final_df[field] = None
+                final_df = _fill_sample_date_time(final_df, logger)
         # TODO remove samples that are not longer present in the raw directory
                     
         # If there are new samples, append them
@@ -86,6 +124,10 @@ def run(ctx: click.Context, project: Path, extra_fields=DEFAULT_EXTRA_FIELDS):
             logger.debug(f"Missing samples: {new_samples['sample_id'].tolist()}")
             logger.debug(f"Missing fields: {missing_fields}")
             final_df = pd.concat([existing_samples, new_samples], ignore_index=True)
+            for field in missing_fields:
+                if field not in final_df.columns:
+                    final_df[field] = None
+            final_df = _fill_sample_date_time(final_df, logger)
    
     else:
         final_df = samples

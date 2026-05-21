@@ -92,7 +92,9 @@ List available samples and create the `meta/samples.csv` file
 cytoprocess list path/to/my_project
 ```
 
-Manually enter the required metadata (such as lon, lat, etc.) in the .csv file. You can add or remove columns as you see fit, you can use the option `--extra-fields` to determine which to add. The conventions follow those of EcoTaxa. Then perform all processing steps, for all samples, with default options:
+When the sample filename contains a timestamp such as `2025-09-04_08h06` or `2025-09-04%2008h06`, `cytoprocess list` fills `object_date` and `object_time` automatically in `meta/samples.csv`. These become the Date and Time fields in EcoTaxa object details and can be used for filtering.
+
+Manually enter any remaining required metadata (such as lon, lat, depth, etc.) in the .csv file. You can add or remove columns as you see fit, you can use the option `--extra-fields` to determine which to add. The conventions follow those of EcoTaxa. Then perform all processing steps, for all samples, with default options:
 
 ```bash
 cytoprocess all path/to/my_project
@@ -135,6 +137,8 @@ cytoprocess upload_all_predictions path/to/project
 ### Image extraction and segmentation fallback
 
 `extract_images` uses the instrument background stored in the converted `.json` file to segment the object in each image. If a converted `.cyz` file contains no images, the sample is skipped cleanly: an empty `image_features.parquet` is written so the pipeline can continue without reprocessing that file forever.
+
+Samples with no particles are handled the same way by the pulse and EcoTaxa preparation steps. Empty summary files and placeholder output directories are created where needed, and `prepare` skips the sample with a `No imaged particles` message instead of stopping the whole project.
 
 If an image exists but no object can be segmented from the background, CytoProcess keeps the object instead of dropping it. It writes the raw image, writes a blank fallback mask, and records:
 
