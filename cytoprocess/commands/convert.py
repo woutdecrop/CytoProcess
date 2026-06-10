@@ -9,6 +9,30 @@ from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
 
 
+def _detect_unsupported_cyz_file(cyz_file: Path) -> str | None:
+    if cyz_file.stat().st_size == 0:
+        return "empty_file"
+
+    return None
+
+
+def _format_unsupported_files(unsupported: list[tuple[Path, str]]) -> str:
+    by_reason: dict[str, list[Path]] = {}
+    for cyz_file, reason in unsupported:
+        by_reason.setdefault(reason, []).append(cyz_file)
+
+    reason_labels = {
+        "empty_file": "empty .cyz file",
+    }
+    parts = []
+    for reason, files in by_reason.items():
+        label = reason_labels.get(reason, reason)
+        preview = ", ".join(f"'{file.name}'" for file in files[:5])
+        suffix = "" if len(files) <= 5 else f", ... ({len(files)} total)"
+        parts.append(f"{len(files)} {label}(s): {preview}{suffix}")
+    return "; ".join(parts)
+
+
 def run(ctx: click.Context, project: Path, force=False):
     # Housekeeping for the command
     logger = setup_logging(command="convert", project=project, debug=ctx.obj["debug"])
@@ -43,6 +67,22 @@ def run(ctx: click.Context, project: Path, force=False):
         logger.warning(f"Then copy/move cyz files to '{project}/raw'")
         return
  
+    unsupported_files = [
+        (cyz_file, reason)
+        for cyz_file in cyz_files
+        if (reason := _detect_unsupported_cyz_file(cyz_file)) is not None
+    ]
+    if unsupported_files:
+        message = (
+            "Some .cyz files cannot be converted by Cyz2Json: "
+            f"{_format_unsupported_files(unsupported_files)}."
+        )
+        if len(unsupported_files) == len(cyz_files):
+            raiseCytoError(message, logger)
+        logger.warning(message)
+        unsupported_paths = {cyz_file for cyz_file, _ in unsupported_files}
+        cyz_files = [cyz_file for cyz_file in cyz_files if cyz_file not in unsupported_paths]
+
 
     # Convert each .cyz file
     for cyz_file in cyz_files:

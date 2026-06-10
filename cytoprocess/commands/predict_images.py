@@ -5,6 +5,7 @@ import json
 import mimetypes
 import os
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -50,6 +51,17 @@ SEGMENTATION_FALLBACK_LABEL = "out of focus"
 _THREAD_LOCAL = local()
 _CATEGORY_MAPPING: dict[str, int] | None = None
 _LOCAL_PREDICTOR: dict | None = None
+
+
+def _configure_safe_console_encoding() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 
 def _run_command(cmd: str) -> tuple[int, str, str]:
@@ -836,6 +848,7 @@ def run(
         if ckpt_name:
             logger.info(f"Requested Docker checkpoint: {ckpt_name}")
     elif backend == "local":
+        _configure_safe_console_encoding()
         try:
             if local_model_root is None and discovered_local_model_root is not None:
                 predictor = _get_local_predictor(

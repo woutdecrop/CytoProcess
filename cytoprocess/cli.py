@@ -248,6 +248,7 @@ def all(ctx, project, force, n_poly, max_cores):
 @click.option("--max-cores", "-m", type=int, default=15, help="Maximum number of CPU cores to use for parallel processing.")
 @click.option("--predict-backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
 @click.option("--predict-zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
+@click.option("--skip-upload", is_flag=True, default=False, help="Stop after image prediction and do not upload or sync predictions to EcoTaxa.")
 @click.option("--username", "-u", help="EcoTaxa email address.")
 @click.option("--password", "-p", help="EcoTaxa password.")
 @click.pass_context
@@ -259,6 +260,7 @@ def all_predict(
     max_cores,
     predict_backend,
     predict_zenodo_version,
+    skip_upload,
     username,
     password,
 ):
@@ -289,6 +291,10 @@ def all_predict(
         backend=predict_backend,
         zenodo_version=predict_zenodo_version,
     )
+    if skip_upload:
+        logger.info("Skipping EcoTaxa upload and prediction sync")
+        return
+
     upload_all_predictions.run(ctx, project=project_path, username=username, password=password)
 
     logger.info("All processing and prediction steps completed successfully")
