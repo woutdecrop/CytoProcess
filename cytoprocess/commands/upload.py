@@ -71,7 +71,7 @@ def _ensure_zip_is_current(zip_path: Path, logger) -> None:
         )
 
 
-def run(ctx: click.Context, project: Path, username: str | None = None, password: str | None = None, update: bool = False):
+def run(ctx: click.Context, project: Path, username: str | None = None, password: str | None = None, update: bool = False, batch_size: int = 50):
     # Housekeeping for the command
     logger = setup_logging(command="upload", project=project, debug=ctx.obj["debug"])
     log_command_start(logger, "Uploading samples to EcoTaxa", project)
@@ -108,6 +108,7 @@ def run(ctx: click.Context, project: Path, username: str | None = None, password
         raiseCytoError(f"Stopping", logger)
     
     logger.info(f"Found {len(zip_files)} zip file(s) to upload")
+    logger.info(f"Using batch mode with batch size: {batch_size} samples")
     
     # Get and display project name
     project_info = ecotaxa.get_project_info(api_url, project_id, token, logger)
@@ -122,11 +123,14 @@ def run(ctx: click.Context, project: Path, username: str | None = None, password
     existing_samples = ecotaxa.get_project_samples(api_url, project_id, token, logger)
     logger.debug(f"Found {len(existing_samples)} existing sample(s) in project")
     
-    # Process each zip file: upload, import, and monitor until complete
-    for zip_path in zip_files:
+    # Batch processing: upload files, then import in batches
+    batch_uploads = []  # List of (sample_id, server_path) tuples
+    all_job_ids = []  # Track all job IDs for monitoring
+    
+    for idx, zip_path in enumerate(zip_files):
         # Extract sample ID from filename (ecotaxa_<sample_id>.zip)
         sample_id = zip_path.stem.replace("ecotaxa_", "")
-        logger.info(f"'{sample_id}'")
+        logger.info(f"[{idx+1}/{len(zip_files)}] '{sample_id}'")
 
         try:
             # Skip if sample already exists (unless updating)
@@ -158,45 +162,73 @@ def run(ctx: click.Context, project: Path, username: str | None = None, password
 
             logger.debug(f"Uploaded to server path: '{server_path}'")
             logger.info(f"  ✔︎ Upload completed")
-
-            logger.debug(f"Importing {sample_id}")
+            
+            # Add to batch queue
             server_directory = Path(server_path).stem
-            import_result = ecotaxa.import_file(api_url, project_id, token, server_directory,
-                                                update_mode="Yes" if update else "", logger=logger)
-            logger.debug(f"Import result: {import_result}")
-
-            if import_result.get("errors"):
-                for error in import_result["errors"]:
-                    logger.error(f"  Error: {error}")
-                    _append_pipeline_failure(project, "import", sample_id, "failed", "import_error", str(error))
-                continue
-
-            job_id = import_result.get("job_id", 0)
-            if job_id <= 0:
-                logger.warning("No job ID returned, import may have failed")
-                _append_pipeline_failure(project, "import", sample_id, "failed", "missing_job_id", "No job ID returned from EcoTaxa import")
-                continue
-
-            logger.info(f"  Import started (job ID: {job_id}), monitoring progress...")
-
-            success = ecotaxa.monitor_job(api_url, job_id, token, logger=logger)
-            if success:
-                logger.info(f"  ✔︎ Import completed")
-            else:
-                logger.warning(f"  ✗ Import failed or requires manual intervention")
-                _append_pipeline_failure(
-                    project,
-                    "import",
-                    sample_id,
-                    "failed",
-                    "job_monitor_failed",
-                    f"EcoTaxa import job {job_id} failed or could not be monitored",
-                )
+            batch_uploads.append((sample_id, server_directory))
+            
+            # When batch is full, import the batch
+            if len(batch_uploads) >= batch_size:
+                logger.info(f"Batch full ({len(batch_uploads)} files), importing batch...")
+                server_paths = [path for _, path in batch_uploads]
+                import_result = ecotaxa.batch_import_files(api_url, project_id, token, server_paths,
+                                                           update_mode="Yes" if update else "", logger=logger)
+                job_ids = import_result.get("job_ids", [])
+                all_job_ids.extend(job_ids)
+                
+                # Monitor batch jobs
+                if job_ids:
+                    logger.info(f"Monitoring {len(job_ids)} import job(s)...")
+                    for sample_id, job_id in zip([s for s, _ in batch_uploads], job_ids):
+                        success = ecotaxa.monitor_job(api_url, job_id, token, logger=logger)
+                        if success:
+                            logger.info(f"  ✔︎ {sample_id} - Import completed")
+                        else:
+                            logger.warning(f"  ✗ {sample_id} - Import failed or requires manual intervention")
+                            _append_pipeline_failure(
+                                project,
+                                "import",
+                                sample_id,
+                                "failed",
+                                "job_monitor_failed",
+                                f"EcoTaxa import job {job_id} failed or could not be monitored",
+                            )
+                
+                # Clear batch
+                batch_uploads = []
+                
         except ClickException as exc:
             logger.error(f"  {exc.message}")
             _append_pipeline_failure(project, "upload", sample_id, "failed", "click_exception", exc.message)
             logger.warning("  Continuing with the next sample")
             continue
+
+    # Process remaining batch
+    if batch_uploads:
+        logger.info(f"Processing final batch ({len(batch_uploads)} files)...")
+        server_paths = [path for _, path in batch_uploads]
+        import_result = ecotaxa.batch_import_files(api_url, project_id, token, server_paths,
+                                                   update_mode="Yes" if update else "", logger=logger)
+        job_ids = import_result.get("job_ids", [])
+        all_job_ids.extend(job_ids)
+        
+        # Monitor batch jobs
+        if job_ids:
+            logger.info(f"Monitoring {len(job_ids)} import job(s)...")
+            for sample_id, job_id in zip([s for s, _ in batch_uploads], job_ids):
+                success = ecotaxa.monitor_job(api_url, job_id, token, logger=logger)
+                if success:
+                    logger.info(f"  ✔︎ {sample_id} - Import completed")
+                else:
+                    logger.warning(f"  ✗ {sample_id} - Import failed or requires manual intervention")
+                    _append_pipeline_failure(
+                        project,
+                        "import",
+                        sample_id,
+                        "failed",
+                        "job_monitor_failed",
+                        f"EcoTaxa import job {job_id} failed or could not be monitored",
+                    )
 
     logger.info(f"Your data is at {eco_url}/prj/{project_id}")
     log_command_success(logger, "Upload")

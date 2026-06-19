@@ -4,8 +4,9 @@ import shutil
 import subprocess
 import zipfile
 from datetime import datetime
-from pathlib import Path
+import os
 import re
+from pathlib import Path
 
 import click
 import pandas as pd
@@ -22,6 +23,7 @@ EXPORT_PREFIX = "ecotaxa_export"
 DATA_DIRNAME = "data"
 TRAINING_IMAGES_DIRNAME = "images_validated"
 TRAINING_MANIFEST_FILENAME = "validated_images.tsv"
+TRAINING_ROOT_DIRNAME = "train"
 PLANKTONCLAS_CONFIG_FILENAME = "config.yaml"
 
 
@@ -359,21 +361,21 @@ def _prepare_training_dataset(
     return output_root, manifest_path, copied
 
 
-def _ensure_planktonclas_project(project: Path, logger) -> None:
+def _ensure_planktonclas_project(project: Path, training_root: Path, logger) -> None:
     required_paths = [
-        project / PLANKTONCLAS_CONFIG_FILENAME,
-        project / DATA_DIRNAME,
-        project / "models",
+        training_root / PLANKTONCLAS_CONFIG_FILENAME,
+        training_root / DATA_DIRNAME,
+        training_root / "models",
     ]
     if all(path.exists() for path in required_paths):
         return
 
-    logger.info(f"Preparing project training layout with 'planktonclas init {project.name}'")
+    logger.info(f"Preparing project training layout with 'planktonclas init {training_root.name}'")
     try:
         subprocess.run(
-            ["planktonclas", "init", project.name],
+            ["planktonclas", "init", training_root.name],
             check=True,
-            cwd=str(project.parent),
+            cwd=str(project),
         )
     except subprocess.CalledProcessError as exc:
         _raise_train_error(f"planktonclas init failed with exit code {exc.returncode}", logger)
@@ -387,15 +389,22 @@ def _set_nested_value(config: dict, section: str, option: str, value) -> None:
     config[section][option]["value"] = value
 
 
-def _prepare_training_config(project: Path, images_dir: Path, logger) -> Path:
-    config_path = project / PLANKTONCLAS_CONFIG_FILENAME
+def _relative_config_path(target: Path, base: Path) -> str:
+    try:
+        return Path(os.path.relpath(target.resolve(), base.resolve())).as_posix()
+    except ValueError:
+        return target.resolve().as_posix()
+
+
+def _prepare_training_config(training_root: Path, images_dir: Path, logger) -> Path:
+    config_path = training_root / PLANKTONCLAS_CONFIG_FILENAME
     try:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         _raise_train_error(f"Failed to read training config '{config_path}': {exc}", logger)
 
     _set_nested_value(config, "general", "base_directory", ".")
-    _set_nested_value(config, "general", "images_directory", "./data/images_validated")
+    _set_nested_value(config, "general", "images_directory", _relative_config_path(images_dir, training_root))
     _set_nested_value(config, "testing", "timestamp", "")
     _set_nested_value(config, "testing", "ckpt_name", "")
 
@@ -405,8 +414,8 @@ def _prepare_training_config(project: Path, images_dir: Path, logger) -> Path:
     return config_path
 
 
-def _latest_local_model_dir(project: Path) -> Path | None:
-    models_dir = project / "models"
+def _latest_local_model_dir(training_root: Path) -> Path | None:
+    models_dir = training_root / "models"
     if not models_dir.exists():
         return None
 
@@ -427,7 +436,8 @@ def run(
     log_command_start(logger, "Preparing training dataset and model", project)
 
     _check_training_project_inputs(project, logger)
-    _ensure_planktonclas_project(project, logger)
+    training_root = project / TRAINING_ROOT_DIRNAME
+    _ensure_planktonclas_project(project, training_root, logger)
 
     resolved_export_tsv = _resolve_export_tsv(project, export_tsv, logger)
 
@@ -443,11 +453,11 @@ def run(
         force=force,
         logger=logger,
     )
-    config_path = _prepare_training_config(project=project, images_dir=training_images_dir, logger=logger)
+    config_path = _prepare_training_config(training_root=training_root, images_dir=training_images_dir, logger=logger)
 
     if config_only:
         logger.info(
-            "Training dataset and config are ready. Edit the config if needed, then run:\n"
+            f"Training dataset and config are ready. Edit '{config_path}' if needed, then run:\n"
             f"  cytoprocess train '{project}'"
         )
         log_command_success(logger, "Prepare training config")
@@ -455,16 +465,16 @@ def run(
 
     try:
         subprocess.run(
-            ["planktonclas", "train", "--config", str(config_path)],
+            ["planktonclas", "train", "--config", str(config_path.resolve())],
             check=True,
-            cwd=str(project),
+            cwd=str(training_root),
         )
     except subprocess.CalledProcessError as exc:
         _raise_train_error(f"planktonclas training failed with exit code {exc.returncode}", logger)
     except FileNotFoundError as exc:
         _raise_train_error(f"Unable to start planktonclas training: {exc}", logger)
 
-    latest_model_dir = _latest_local_model_dir(project)
+    latest_model_dir = _latest_local_model_dir(training_root)
     if latest_model_dir is not None:
         logger.info(f"Latest trained model: '{latest_model_dir}'")
 

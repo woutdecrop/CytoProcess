@@ -34,7 +34,8 @@ CLASSIFIER_NAME = "flowcyto_obsea_classifier"
 CLASSIFIER_EMAIL = "wout.decrop@vliz.be"
 DEFAULT_CKPT_NAME = "final_model.keras"
 DEFAULT_LOCAL_MODEL_ROOT = "FlowCytoClassifier"
-DEFAULT_PROJECT_MODEL_ROOT = "models"
+DEFAULT_PROJECT_MODEL_ROOT = "train"
+LEGACY_PROJECT_MODEL_ROOT = "models"
 LOCAL_MODEL_ROOT_ENV = "CYTOPROCESS_LOCAL_MODEL_ROOT"
 PREDICT_BACKEND_ENV = "CYTOPROCESS_PREDICT_BACKEND"
 LOCAL_PREDICT_CHUNK_SIZE = 256
@@ -535,6 +536,14 @@ def _candidate_local_model_roots(project: Path) -> list[Path]:
     if env_root:
         candidates.append(Path(env_root).expanduser())
 
+    candidates.extend(
+        [
+            project / DEFAULT_PROJECT_MODEL_ROOT,
+            Path.cwd() / DEFAULT_PROJECT_MODEL_ROOT,
+            project.parent / DEFAULT_PROJECT_MODEL_ROOT,
+        ]
+    )
+
     try:
         from cytoprocess.commands.install import get_predict_model_install_dir
 
@@ -544,9 +553,9 @@ def _candidate_local_model_roots(project: Path) -> list[Path]:
 
     candidates.extend(
         [
-            project / DEFAULT_PROJECT_MODEL_ROOT,
-            Path.cwd() / DEFAULT_PROJECT_MODEL_ROOT,
-            project.parent / DEFAULT_PROJECT_MODEL_ROOT,
+            project / LEGACY_PROJECT_MODEL_ROOT,
+            Path.cwd() / LEGACY_PROJECT_MODEL_ROOT,
+            project.parent / LEGACY_PROJECT_MODEL_ROOT,
             Path.cwd() / DEFAULT_LOCAL_MODEL_ROOT,
             project.parent / DEFAULT_LOCAL_MODEL_ROOT,
             project / DEFAULT_LOCAL_MODEL_ROOT,

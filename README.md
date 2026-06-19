@@ -186,6 +186,52 @@ Notes:
 - `upload_all_predictions` uploads the sample data first, then applies all available predictions through the EcoTaxa API.
 - EcoTaxa records these as automatic predictions, so the history `Author` field remains empty (`-`) even though the model name is stored in the exported prediction metadata.
 
+### Training a local classifier
+
+After objects have been uploaded to EcoTaxa and manually validated there, `cytoprocess train` can build a training dataset from those validated annotations and train a local `planktonclas` model for the project.
+
+The project should already contain extracted images in `work/<sample>/images`, usually after running:
+
+```bash
+cytoprocess extract_images path/to/project
+```
+
+or a full processing command such as:
+
+```bash
+cytoprocess all path/to/project
+```
+
+Then run:
+
+```bash
+cytoprocess train path/to/project
+```
+
+The command performs these steps:
+
+1. Find the newest EcoTaxa export in `data/ecotaxa_export*.tsv`, or download a fresh TSV export from the EcoTaxa project configured in `config/config.yaml`.
+2. Keep only objects whose EcoTaxa annotation status is `validated`.
+3. Match each validated `object_id` from the EcoTaxa export to the corresponding local image in `work/<sample>/images`.
+4. Copy matched images into category folders under `data/images_validated/`.
+5. Write `data/validated_images.tsv`, which records the source image, copied training image, object id, and category.
+6. Create or update the `planktonclas` project layout under `train/` and set `train/config.yaml` to train from `../data/images_validated`.
+7. Run `planktonclas train --config train/config.yaml` and save the new model under `train/models/`.
+
+If an existing EcoTaxa export is found, CytoProcess asks whether to reuse it. Answer `n` to download a fresh export. You can also provide an export explicitly:
+
+```bash
+cytoprocess train path/to/project --export-tsv path/to/ecotaxa_export.tsv
+```
+
+To prepare the validated image dataset and `train/config.yaml` without starting the training run, use:
+
+```bash
+cytoprocess train path/to/project --config
+```
+
+This is useful when you want to inspect or edit the `planktonclas` settings first. Once `train/config.yaml` is ready, run `cytoprocess train path/to/project` again. Use `--force` when you want to delete and rebuild `data/images_validated` before training.
+
 
 ### Customisation
 

@@ -524,6 +524,91 @@ def import_file(api_url: str, project_id: int, token: str, server_path: str, upd
         raiseCytoError(f"Import request failed: {e}", logger)
 
 
+def batch_import_files(api_url: str, project_id: int, token: str, server_paths: list[str], update_mode: str = "", logger: logging.Logger = None) -> dict:
+    """
+    Start batch import jobs for multiple files already uploaded to EcoTaxa.
+    
+    Imports files in a batch to improve performance on large projects.
+
+    Args:
+        api_url: EcoTaxa API URL
+        project_id: EcoTaxa project ID
+        token: JWT authentication token
+        server_paths: List of paths to files on EcoTaxa server
+        logger: Logger instance
+        update_mode: Update mode for the import ('Yes' to update data, 'Cla' to also update classification)
+
+    Returns:
+        Dictionary with 'job_ids' list if successful, or 'errors' list if any failed.
+    """
+    if not server_paths:
+        if logger:
+            logger.warning("No files to import in batch")
+        return {"job_ids": []}
+    
+    if logger:
+        logger.info(f"  Starting batch import of {len(server_paths)} file(s)")
+    
+    job_ids = []
+    errors = []
+    
+    try:
+        for server_path in server_paths:
+            import_req = {
+                "source_path": server_path,
+                "skip_loaded_files": False,
+                "skip_existing_objects": False if update_mode == "" else True,
+                "update_mode": update_mode,
+            }
+            
+            try:
+                response = requests.post(
+                    f"{api_url}/file_import/{project_id}",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json=import_req,
+                    timeout=60,
+                )
+                
+                time.sleep(1)  # Small delay between batch requests
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    job_id = result.get("job_id", 0)
+                    if job_id > 0:
+                        job_ids.append(job_id)
+                        if logger:
+                            logger.debug(f"Batch import job created for {server_path}: {job_id}")
+                    else:
+                        error_msg = f"No job ID returned for {server_path}"
+                        errors.append(error_msg)
+                        if logger:
+                            logger.error(f"  {error_msg}")
+                else:
+                    error_msg = f"Import failed for {server_path}: {response.text}"
+                    errors.append(error_msg)
+                    if logger:
+                        logger.error(f"  {error_msg}")
+            except requests.RequestException as e:
+                error_msg = f"Import request failed for {server_path}: {e}"
+                errors.append(error_msg)
+                if logger:
+                    logger.error(f"  {error_msg}")
+        
+        if logger and job_ids:
+            logger.info(f"  ✔︎ Batch import started ({len(job_ids)} job(s))")
+        
+        return {
+            "job_ids": job_ids,
+            "errors": errors if errors else None
+        }
+    
+    except Exception as e:
+        error_msg = f"Batch import failed: {e}"
+        if logger:
+            logger.error(error_msg)
+        return {"job_ids": [], "errors": [error_msg]}
+
+
 def get_job(api_url: str, job_id: int, token: str, logger: logging.Logger) -> dict | None:
     """
     Get job status from EcoTaxa API.

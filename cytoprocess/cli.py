@@ -355,7 +355,7 @@ def predict(ctx, project, model, force):
 @click.option("--force", "-f", is_flag=True, default=False, help="Force re-prediction even if output already exists.")
 @click.option("--backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
 @click.option("--zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
-@click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/models is preferred.")
+@click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/train/models is preferred.")
 @click.option("--local-timestamp", default=None, help="Optional local model timestamp directory to use inside the selected model root.")
 @click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
 @click.pass_context
@@ -380,12 +380,58 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
 
 @cli.command(name="train")
 @click.argument("project", type=click.Path(exists=True))
-@click.option("--export-tsv", default=None, type=click.Path(exists=True), hidden=True)
-@click.option("--force", "-f", is_flag=True, default=False, help="Rebuild the validated training image dataset before training.")
-@click.option("--config", "config_only", is_flag=True, default=False, help="Prepare the validated training dataset and planktonclas config, then stop so you can edit the config before training.")
+@click.option(
+    "--export-tsv",
+    default=None,
+    type=click.Path(exists=True),
+    help=(
+        "Use this EcoTaxa TSV export instead of reusing or downloading one. "
+        "The export must contain validated objects with object_id, object_annotation_status, "
+        "and object_annotation_category columns."
+    ),
+)
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    default=False,
+    help="Delete and rebuild data/images_validated before preparing the training run.",
+)
+@click.option(
+    "--config",
+    "config_only",
+    is_flag=True,
+    default=False,
+    help="Prepare data/images_validated, data/validated_images.tsv, and train/config.yaml, then stop before training.",
+)
 @click.pass_context
 def train(ctx, project, export_tsv, force, config_only):
-    """Reuse or fetch the latest EcoTaxa export, build /data/images_validated, and train a new project model."""
+    """
+    Build a training set from EcoTaxa validations and train a local model.
+
+    \b
+    The project should already have extracted images in work/<sample>/images,
+    usually after running extract_images, all, or all_predict. EcoTaxa must also
+    contain validated object annotations for the project.
+
+    \b
+    Steps performed:
+    1. Reuse the newest data/ecotaxa_export*.tsv when available, or ask whether
+       to download a fresh TSV export from the EcoTaxa project configured in
+       config/config.yaml.
+    2. Keep only rows whose object_annotation_status is "validated".
+    3. Match each validated EcoTaxa object_id to the local extracted image.
+    4. Copy matched images into data/images_validated/<category>/ and write
+       data/validated_images.tsv as a manifest.
+    5. Create or update the planktonclas layout under train/ and
+       train/config.yaml so it reads ../data/images_validated.
+    6. Run planktonclas train --config train/config.yaml and save the trained
+       model under train/models/.
+
+    \b
+    Use --config when you want to inspect or edit train/config.yaml before
+    launching training. Re-run this command without --config to start training.
+    """
     from cytoprocess.commands import train
     train.run(
         ctx,
