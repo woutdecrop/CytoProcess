@@ -24,7 +24,7 @@ DATA_DIRNAME = "data"
 TRAINING_IMAGES_DIRNAME = "images_validated"
 TRAINING_MANIFEST_FILENAME = "validated_images.tsv"
 TRAINING_ROOT_DIRNAME = "train"
-PLANKTONCLAS_CONFIG_FILENAME = "config.yaml"
+PLANKTONCLASS_CONFIG_FILENAME = "config.yaml"
 
 
 def _raise_train_error(message: str, logger=None):
@@ -361,26 +361,26 @@ def _prepare_training_dataset(
     return output_root, manifest_path, copied
 
 
-def _ensure_planktonclas_project(project: Path, training_root: Path, logger) -> None:
+def _ensure_PLANKTONCLASS_project(project: Path, training_root: Path, logger) -> None:
     required_paths = [
-        training_root / PLANKTONCLAS_CONFIG_FILENAME,
+        training_root / PLANKTONCLASS_CONFIG_FILENAME,
         training_root / DATA_DIRNAME,
         training_root / "models",
     ]
     if all(path.exists() for path in required_paths):
         return
 
-    logger.info(f"Preparing project training layout with 'planktonclas init {training_root.name}'")
+    logger.info(f"Preparing project training layout with 'PLANKTONCLASS init {training_root.name}'")
     try:
         subprocess.run(
-            ["planktonclas", "init", training_root.name],
+            ["PLANKTONCLASS", "init", training_root.name],
             check=True,
             cwd=str(project),
         )
     except subprocess.CalledProcessError as exc:
-        _raise_train_error(f"planktonclas init failed with exit code {exc.returncode}", logger)
+        _raise_train_error(f"planktonclass init failed with exit code {exc.returncode}", logger)
     except FileNotFoundError as exc:
-        _raise_train_error(f"Unable to start planktonclas init: {exc}", logger)
+        _raise_train_error(f"Unable to start planktonclass init: {exc}", logger)
 
 
 def _set_nested_value(config: dict, section: str, option: str, value) -> None:
@@ -437,7 +437,7 @@ def run(
 
     _check_training_project_inputs(project, logger)
     training_root = project / TRAINING_ROOT_DIRNAME
-    _ensure_planktonclas_project(project, training_root, logger)
+    _ensure_planktonclass_project(project, training_root, logger)
 
     resolved_export_tsv = _resolve_export_tsv(project, export_tsv, logger)
 
@@ -465,14 +465,14 @@ def run(
 
     try:
         subprocess.run(
-            ["planktonclas", "train", "--config", str(config_path.resolve())],
+            ["planktonclass", "train", "--config", str(config_path.resolve())],
             check=True,
             cwd=str(training_root),
         )
     except subprocess.CalledProcessError as exc:
-        _raise_train_error(f"planktonclas training failed with exit code {exc.returncode}", logger)
+        _raise_train_error(f"planktonclass training failed with exit code {exc.returncode}", logger)
     except FileNotFoundError as exc:
-        _raise_train_error(f"Unable to start planktonclas training: {exc}", logger)
+        _raise_train_error(f"Unable to start planktonclass training: {exc}", logger)
 
     latest_model_dir = _latest_local_model_dir(training_root)
     if latest_model_dir is not None:

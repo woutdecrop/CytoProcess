@@ -248,6 +248,9 @@ def all(ctx, project, force, n_poly, max_cores):
 @click.option("--max-cores", "-m", type=int, default=15, help="Maximum number of CPU cores to use for parallel processing.")
 @click.option("--predict-backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
 @click.option("--predict-zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
+@click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/train/models is preferred.")
+@click.option("--local-timestamp", default=None, help="Optional local model timestamp directory to use inside the selected model root.")
+@click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
 @click.option("--skip-upload", is_flag=True, default=False, help="Stop after image prediction and do not upload or sync predictions to EcoTaxa.")
 @click.option("--username", "-u", help="EcoTaxa email address.")
 @click.option("--password", "-p", help="EcoTaxa password.")
@@ -260,6 +263,9 @@ def all_predict(
     max_cores,
     predict_backend,
     predict_zenodo_version,
+    local_model_root,
+    local_timestamp,
+    ckpt_name,
     skip_upload,
     username,
     password,
@@ -290,6 +296,9 @@ def all_predict(
         force=force,
         backend=predict_backend,
         zenodo_version=predict_zenodo_version,
+        local_model_root=local_model_root,
+        local_timestamp=local_timestamp,
+        ckpt_name=ckpt_name,
     )
     if skip_upload:
         logger.info("Skipping EcoTaxa upload and prediction sync")
@@ -423,9 +432,9 @@ def train(ctx, project, export_tsv, force, config_only):
     3. Match each validated EcoTaxa object_id to the local extracted image.
     4. Copy matched images into data/images_validated/<category>/ and write
        data/validated_images.tsv as a manifest.
-    5. Create or update the planktonclas layout under train/ and
+    5. Create or update the planktonclass layout under train/ and
        train/config.yaml so it reads ../data/images_validated.
-    6. Run planktonclas train --config train/config.yaml and save the trained
+    6. Run planktonclass train --config train/config.yaml and save the trained
        model under train/models/.
 
     \b
@@ -457,11 +466,22 @@ def overwrite_ecotaxa(ctx, project, username, password):
 @click.argument("project", type=click.Path(exists=True))
 @click.option("--username", "-u", help="EcoTaxa email address.")
 @click.option("--password", "-p", help="EcoTaxa password.")
+@click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/train/models is preferred.")
+@click.option("--local-timestamp", default=None, help="Optional local model timestamp directory to use inside the selected model root.")
+@click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
 @click.pass_context
-def upload_all_predictions(ctx, project, username, password):
+def upload_all_predictions(ctx, project, username, password, local_model_root, local_timestamp, ckpt_name):
     """Upload sample archives, then sync local predictions onto matching EcoTaxa objects."""
     from cytoprocess.commands import upload_all_predictions
-    upload_all_predictions.run(ctx, project=Path(project).expanduser(), username=username, password=password)
+    upload_all_predictions.run(
+        ctx,
+        project=Path(project).expanduser(),
+        username=username,
+        password=password,
+        local_model_root=local_model_root,
+        local_timestamp=local_timestamp,
+        ckpt_name=ckpt_name,
+    )
 
 
 
