@@ -106,6 +106,10 @@ To run the same processing chain and also classify images, upload the samples, a
 cytoprocess all_predict path/to/my_project
 ```
 
+If `all_predict` fails because `meta/samples.csv` is missing, run `cytoprocess list path/to/my_project` first.
+
+`all_predict` runs image prediction, then `upload_all_predictions`, which itself performs `prepare`, `upload`, and `overwrite_ecotaxa`.
+
 If you want to know the details, or proceed manually, the main steps are:
 
 ```bash
@@ -130,9 +134,32 @@ cytoprocess prepare path/to/project
 cytoprocess upload path/to/project
 # update existing EcoTaxa objects with predicted classes
 cytoprocess overwrite_ecotaxa path/to/project
-# upload new samples, then apply all available predictions
+```
+
+`predict_images` writes prediction metadata to `work/<sample>/predictions.parquet`, but it does not upload those predictions to EcoTaxa by itself. The usual workflow is therefore:
+
+```bash
+# import the prepared EcoTaxa ZIP files
+cytoprocess upload path/to/project
+
+# apply the stored predictions to existing EcoTaxa objects
+cytoprocess overwrite_ecotaxa path/to/project
+```
+
+If you want to do both in one step, use:
+
+```bash
 cytoprocess upload_all_predictions path/to/project
 ```
+
+This command rebuilds the EcoTaxa ZIPs without prediction columns, uploads the samples, and then applies the available predictions through the EcoTaxa API.
+
+Notes:
+
+- `upload` imports the prepared EcoTaxa ZIP files.
+- `overwrite_ecotaxa` reads `work/<sample>/predictions.parquet` and applies the stored predictions to objects that already exist in EcoTaxa.
+- `upload_all_predictions` uploads the sample data first, then applies all available predictions through the EcoTaxa API.
+- EcoTaxa records these as automatic predictions, so the history `Author` field remains empty (`-`) even though the model name is stored in the exported prediction metadata.
 
 ### Image extraction and segmentation fallback
 
@@ -158,7 +185,7 @@ This keeps the object visible in EcoTaxa while making it explicit that the image
 
 ### Prediction Upload Modes
 
-`predict_images` creates one prediction file in `work/` for each sample:
+`predict_images` writes one prediction file in `work/` for each sample:
 
 ```bash
 work/<sample>/predictions.parquet
@@ -166,29 +193,14 @@ work/<sample>/predictions.parquet
 
 This file stores the top predicted label and, when available, the top 3 predicted labels and their scores. Failed-segmentation objects are included in the same file as `out of focus` and are not classified by the model.
 
-Use the following commands depending on what is already present on EcoTaxa:
 
-```bash
-# Upload samples only, using the standard EcoTaxa ZIP import flow
-cytoprocess upload path/to/project
 
-# Apply predictions to objects that already exist in EcoTaxa
-cytoprocess overwrite_ecotaxa path/to/project
-
-# Rebuild ZIPs without prediction columns, upload them, then apply predictions
-cytoprocess upload_all_predictions path/to/project
-```
-
-Notes:
-
-- `upload` imports the prepared EcoTaxa ZIP files.
-- `overwrite_ecotaxa` reads `work/<sample>/predictions.parquet` and applies the stored predictions to objects that already exist in EcoTaxa.
-- `upload_all_predictions` uploads the sample data first, then applies all available predictions through the EcoTaxa API.
-- EcoTaxa records these as automatic predictions, so the history `Author` field remains empty (`-`) even though the model name is stored in the exported prediction metadata.
 
 ### Training a local classifier
 
-After objects have been uploaded to EcoTaxa and manually validated there, `cytoprocess train` can build a training dataset from those validated annotations and train a local `planktonclas` model for the project.
+After objects have been uploaded to EcoTaxa and manually validated there, `cytoprocess train` can build a training dataset from those validated annotations and train a local `planktonclass` model for the project.
+
+Local prediction and training require the `planktonclass` package to be installed in your Python environment (`pip install planktonclass`).
 
 The project should already contain extracted images in `work/<sample>/images`, usually after running:
 
@@ -215,8 +227,8 @@ The command performs these steps:
 3. Match each validated `object_id` from the EcoTaxa export to the corresponding local image in `work/<sample>/images`.
 4. Copy matched images into category folders under `data/images_validated/`.
 5. Write `data/validated_images.tsv`, which records the source image, copied training image, object id, and category.
-6. Create or update the `planktonclas` project layout under `train/` and set `train/config.yaml` to train from `../data/images_validated`.
-7. Run `planktonclas train --config train/config.yaml` and save the new model under `train/models/`.
+6. Create or update the `planktonclass` project layout under `train/` and set `train/config.yaml` to train from `../data/images_validated`.
+7. Run `planktonclass train --config train/config.yaml` and save the new model under `train/models/`.
 
 If an existing EcoTaxa export is found, CytoProcess asks whether to reuse it. Answer `n` to download a fresh export. You can also provide an export explicitly:
 
@@ -230,8 +242,26 @@ To prepare the validated image dataset and `train/config.yaml` without starting 
 cytoprocess train path/to/project --config
 ```
 
-This is useful when you want to inspect or edit the `planktonclas` settings first. Once `train/config.yaml` is ready, run `cytoprocess train path/to/project` again. Use `--force` when you want to delete and rebuild `data/images_validated` before training.
+This is useful when you want to inspect or edit the `planktonclass` settings first. Once `train/config.yaml` is ready, run `cytoprocess train path/to/project` again. Use `--force` when you want to delete and rebuild `data/images_validated` before training.
 
+After training, you can run predictions again with the newly trained model by pointing to the timestamped model directory:
+
+```bash
+cytoprocess predict_images path/to/project --local-timestamp <timestamp>
+```
+
+or for the upload-and-sync workflow with a specific model:
+```bash
+cytoprocess upload_all_predictions path/to/project --local-timestamp <timestamp>
+```
+
+For the full end-to-end workflow, use:
+
+```bash
+cytoprocess all_predict path/to/project --local-timestamp <timestamp>
+```
+
+Use the timestamp directory that was created under `train/models/` for the model you want to use.
 
 ### Customisation
 
