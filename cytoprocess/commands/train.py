@@ -397,7 +397,7 @@ def _relative_config_path(target: Path, base: Path) -> str:
 
 
 def _prepare_training_config(training_root: Path, images_dir: Path, logger) -> Path:
-    config_path = training_root / PLANKTONCLAS_CONFIG_FILENAME
+    config_path = training_root / PLANKTONCLASS_CONFIG_FILENAME
     try:
         config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
@@ -437,7 +437,7 @@ def run(
 
     _check_training_project_inputs(project, logger)
     training_root = project / TRAINING_ROOT_DIRNAME
-    _ensure_planktonclass_project(project, training_root, logger)
+    _ensure_PLANKTONCLASS_project(project, training_root, logger)
 
     resolved_export_tsv = _resolve_export_tsv(project, export_tsv, logger)
 
