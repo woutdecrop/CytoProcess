@@ -16,8 +16,5 @@ def run(
         ctx,
         project,
         username=username,
-        password=password,
-        local_model_root=local_model_root,
-        local_timestamp=local_timestamp,
-        ckpt_name=ckpt_name,
+        password=password
     )
