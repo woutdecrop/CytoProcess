@@ -409,8 +409,22 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
     default=False,
     help="Prepare data/images_validated, data/validated_images.tsv, and train/config.yaml, then stop before training.",
 )
+@click.option(
+    "--export-only",
+    "export_only",
+    is_flag=True,
+    default=False,
+    help="Prepare validated training images and config, then exit (do not run training).",
+)
+@click.option(
+    "--train-only",
+    "train_only",
+    is_flag=True,
+    default=False,
+    help="Run only the training step using existing train/config.yaml (do not prepare dataset).",
+)
 @click.pass_context
-def train(ctx, project, export_tsv, force, config_only, annotator):
+def train(ctx, project, export_tsv, force, config_only, annotator, export_only, train_only):
     """
     Build a training set from EcoTaxa validations and train a local model.
 
@@ -443,7 +457,9 @@ def train(ctx, project, export_tsv, force, config_only, annotator):
         project=Path(project).expanduser(),
         export_tsv=Path(export_tsv).expanduser() if export_tsv else None,
         force=force,
-        config_only=config_only,
+        config_only=config_only or export_only,
+        export_only=export_only,
+        train_only=train_only,
         annotator=annotator,
     )
 

@@ -437,6 +437,8 @@ def run(
     export_tsv: Path | None = None,
     force: bool = False,
     config_only: bool = False,
+    export_only: bool = False,
+    train_only: bool = False,
     annotator: str = "Luz Amadei Matinez",
 ):
     logger = setup_logging(command="train", project=project, debug=ctx.obj["debug"])
@@ -445,6 +447,35 @@ def run(
     _check_training_project_inputs(project, logger)
     training_root = project / TRAINING_ROOT_DIRNAME
     _ensure_PLANKTONCLASS_project(project, training_root, logger)
+
+    if export_only and train_only:
+        _raise_train_error("--export-only and --train-only cannot be used together", logger)
+
+    # If only training is requested, skip export/prepare steps
+    if train_only:
+        config_path = training_root / PLANKTONCLASS_CONFIG_FILENAME
+        if not config_path.exists():
+            _raise_train_error(
+                "Training config not found. Run 'cytoprocess train --export-only' first to prepare the dataset and config.",
+                logger,
+            )
+        try:
+            subprocess.run(
+                ["planktonclass", "train", "--config", str(config_path.resolve())],
+                check=True,
+                cwd=str(training_root),
+            )
+        except subprocess.CalledProcessError as exc:
+            _raise_train_error(f"planktonclass training failed with exit code {exc.returncode}", logger)
+        except FileNotFoundError as exc:
+            _raise_train_error(f"Unable to start planktonclass training: {exc}", logger)
+
+        latest_model_dir = _latest_local_model_dir(training_root)
+        if latest_model_dir is not None:
+            logger.info(f"Latest trained model: '{latest_model_dir}'")
+
+        log_command_success(logger, "Train local classifier")
+        return
 
     resolved_export_tsv = _resolve_export_tsv(project, export_tsv, logger)
 

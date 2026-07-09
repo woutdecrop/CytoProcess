@@ -244,6 +244,21 @@ cytoprocess train path/to/project --config
 
 This is useful when you want to inspect or edit the `planktonclass` settings first. Once `train/config.yaml` is ready, run `cytoprocess train path/to/project` again. Use `--force` when you want to delete and rebuild `data/images_validated` before training.
 
+New: split export and training
+
+You can now separate the dataset export/preparation and the training steps:
+
+```bash
+# Prepare validated images and training config, but do not start training
+cytoprocess train path/to/project --export-only
+
+# Run only the training step using an existing train/config.yaml
+cytoprocess train path/to/project --train-only
+
+# Default behaviour (export + train)
+cytoprocess train path/to/project
+```
+
 After training, you can run predictions again with the newly trained model by pointing to the timestamped model directory:
 
 ```bash
