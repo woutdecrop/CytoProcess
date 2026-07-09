@@ -240,7 +240,7 @@ def _load_validated_export(export_tsv: Path, logger) -> pd.DataFrame:
     except Exception as exc:
         _raise_train_error(f"Failed to read EcoTaxa export '{export_tsv}': {exc}", logger)
 
-    required_columns = {"object_id", "object_annotation_status", "object_annotation_category"}
+    required_columns = {"object_id", "object_annotation_status", "object_annotation_category", "object_annotation_person_name"}
     missing_columns = sorted(required_columns - set(df.columns))
     if missing_columns:
         _raise_train_error(
@@ -255,6 +255,8 @@ def _load_validated_export(export_tsv: Path, logger) -> pd.DataFrame:
         lambda value: _safe_path_part(value, "unclassified")
     )
     df = df[df["annotation_status_clean"] == "validated"].copy()
+    df = df[df["object_id_clean"] != ""].copy()
+    df = df[df["object_annotation_person_name"].map(_clean_value) == "Luz Amadei Matinez"].copy()
     df = df[df["object_id_clean"] != ""].copy()
 
     if df.empty:
