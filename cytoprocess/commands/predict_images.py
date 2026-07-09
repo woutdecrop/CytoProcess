@@ -24,8 +24,8 @@ from cytoprocess.logging import log_command_start, log_command_success, setup_lo
 from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
 
-PREDICT_URL_REMOTE = "http://127.0.0.1:5000/v2/models/planktonclas/predict/"
-MODEL_INFO_URL = "http://127.0.0.1:5000/v2/models/planktonclas/"
+PREDICT_URL_REMOTE = "http://127.0.0.1:5000/v2/models/planktonclasss/predict/"
+MODEL_INFO_URL = "http://127.0.0.1:5000/v2/models/planktonclasss/"
 SWAGGER_URL = "http://127.0.0.1:5000/swagger.json"
 DOCKER_CONTAINER_NAME = "phyto_classifier_container_flowcyto_obsea"
 DOCKER_IMAGE = "wdecrop/cyto-plankton-classifier:flowcyto-obsea"
@@ -194,7 +194,7 @@ def _log_predictor_details(logger) -> None:
         swagger_response = requests.get(SWAGGER_URL, timeout=5)
         swagger_response.raise_for_status()
         swagger = swagger_response.json()
-        predict_post = swagger["paths"]["/v2/models/planktonclas/predict/"]["post"]
+        predict_post = swagger["paths"]["/v2/models/planktonclass/predict/"]["post"]
         parameters = predict_post.get("parameters", [])
 
         timestamp_values = []
@@ -671,13 +671,13 @@ def _get_local_predictor(
         return _LOCAL_PREDICTOR
 
     try:
-        from planktonclas.data_utils import load_class_names
-        from planktonclas.test_utils import predict as plankton_predict
-        from planktonclas.utils import get_custom_objects
+        from planktonclass.data_utils import load_class_names
+        from planktonclass.test_utils import predict as plankton_predict
+        from planktonclass.utils import get_custom_objects
         from tensorflow.keras.models import load_model
     except ImportError as exc:
         raise RuntimeError(
-            "Local prediction requires the 'planktonclas' and TensorFlow packages to be installed."
+            "Local prediction requires the 'planktonclass' and TensorFlow packages to be installed."
         ) from exc
 
     dataset_files_dir = timestamp_dir / "dataset_files"
