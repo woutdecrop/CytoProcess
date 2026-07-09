@@ -234,7 +234,7 @@ def _resolve_export_tsv(project: Path, explicit_export_tsv: Path | None, logger)
     return _download_fresh_export(project, logger)
 
 
-def _load_validated_export(export_tsv: Path, logger) -> pd.DataFrame:
+def _load_validated_export(export_tsv: Path, logger, annotator: str | None = None) -> pd.DataFrame:
     try:
         df = pd.read_csv(export_tsv, sep="\t", quotechar='"', dtype=str, low_memory=False)
     except Exception as exc:
@@ -256,8 +256,11 @@ def _load_validated_export(export_tsv: Path, logger) -> pd.DataFrame:
     )
     df = df[df["annotation_status_clean"] == "validated"].copy()
     df = df[df["object_id_clean"] != ""].copy()
-    df = df[df["object_annotation_person_name"].map(_clean_value) == "Luz Amadei Matinez"].copy()
-    df = df[df["object_id_clean"] != ""].copy()
+
+    if annotator is not None:
+        annotator_clean = _clean_value(annotator)
+        if annotator_clean:
+            df = df[df["object_annotation_person_name"].map(_clean_value) == annotator_clean].copy()
 
     if df.empty:
         _raise_train_error(f"No validated objects were found in '{export_tsv}'", logger)
@@ -298,8 +301,9 @@ def _prepare_training_dataset(
     manifest_path: Path,
     force: bool,
     logger,
+    annotator: str | None = None,
 ) -> tuple[Path, Path, int]:
-    validated_df = _load_validated_export(export_tsv, logger)
+    validated_df = _load_validated_export(export_tsv, logger, annotator)
     source_index = _build_project_image_index(project)
 
     if force and output_root.exists():
@@ -433,6 +437,7 @@ def run(
     export_tsv: Path | None = None,
     force: bool = False,
     config_only: bool = False,
+    annotator: str = "Luz Amadei Matinez",
 ):
     logger = setup_logging(command="train", project=project, debug=ctx.obj["debug"])
     log_command_start(logger, "Preparing training dataset and model", project)
@@ -454,6 +459,7 @@ def run(
         manifest_path=manifest_path,
         force=force,
         logger=logger,
+        annotator=annotator,
     )
     config_path = _prepare_training_config(training_root=training_root, images_dir=training_images_dir, logger=logger)
 

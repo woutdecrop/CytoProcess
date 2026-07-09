@@ -398,6 +398,11 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
     help="Delete and rebuild data/images_validated before preparing the training run.",
 )
 @click.option(
+    "--annotator",
+    default="Luz Amadei Matinez",
+    help="Filter validated EcoTaxa rows by annotator name when preparing the training dataset.",
+)
+@click.option(
     "--config",
     "config_only",
     is_flag=True,
@@ -405,7 +410,7 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
     help="Prepare data/images_validated, data/validated_images.tsv, and train/config.yaml, then stop before training.",
 )
 @click.pass_context
-def train(ctx, project, export_tsv, force, config_only):
+def train(ctx, project, export_tsv, force, config_only, annotator):
     """
     Build a training set from EcoTaxa validations and train a local model.
 
@@ -439,6 +444,7 @@ def train(ctx, project, export_tsv, force, config_only):
         export_tsv=Path(export_tsv).expanduser() if export_tsv else None,
         force=force,
         config_only=config_only,
+        annotator=annotator,
     )
 
 
