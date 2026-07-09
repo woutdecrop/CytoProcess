@@ -24,7 +24,6 @@ from cytoprocess.logging import log_command_start, log_command_success, setup_lo
 from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
 
-
 PREDICT_URL_REMOTE = "http://127.0.0.1:5000/v2/models/planktonclass/predict/"
 MODEL_INFO_URL = "http://127.0.0.1:5000/v2/models/planktonclass/"
 SWAGGER_URL = "http://127.0.0.1:5000/swagger.json"
