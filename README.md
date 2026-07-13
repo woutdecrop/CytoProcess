@@ -249,7 +249,8 @@ New: split export and training
 You can now separate the dataset export/preparation and the training steps:
 
 ```bash
-# Prepare validated images and training config, but do not start training
+# Prepare validated images and training config, but do not start training. 
+#this is useful if you first need to download the images from ecotaxa and then select which classes you want to include in the model. For that, after running this comand you need to delete the folders you don't want to include of images_validated before running the next step. 
 cytoprocess train path/to/project --export-only
 
 # Run only the training step using an existing train/config.yaml
