@@ -253,34 +253,164 @@ def _as_list(value):
     return [value]
 
 
+import re
+import pandas as pd
+
+
+def _generate_mapping_file(export_file: Path, mapping_file: Path) -> None:
+    """
+    Generate a mapping file from an EcoTaxa export TSV.
+
+    Handles both:
+    - Single category columns
+    - Multi-category columns containing arrays such as:
+        object_annotation_category_ids: [94778. 95471.]
+        object_annotation_categories: ['Cat A' 'Cat B']
+    """
+
+    # Read the TSV (skip EcoTaxa datatype row if present)
+    try:
+        df = pd.read_csv(export_file, sep="\t", skiprows=[1])
+    except Exception:
+        df = pd.read_csv(export_file, sep="\t")
+
+    raw_mappings = []
+
+    # ------------------------------------------------------------------
+    # New EcoTaxa export (plural columns)
+    # ------------------------------------------------------------------
+    if (
+        "object_annotation_category_ids" in df.columns
+        and "object_annotation_categories" in df.columns
+    ):
+        for _, row in df.iterrows():
+            raw_ids = row["object_annotation_category_ids"]
+            raw_names = row["object_annotation_categories"]
+
+            if pd.isna(raw_ids) or pd.isna(raw_names):
+                continue
+
+            # Parse category names
+            names_str = str(raw_names).strip()
+            if names_str.startswith("[") and names_str.endswith("]"):
+                names_list = re.findall(r"'(.*?)'", names_str)
+            else:
+                names_list = [names_str]
+
+            # Parse category IDs
+            ids_str = str(raw_ids).strip()
+            if ids_str.startswith("[") and ids_str.endswith("]"):
+                ids_list = [
+                    int(float(x))
+                    for x in re.findall(r"[\d\.]+", ids_str)
+                ]
+            else:
+                try:
+                    ids_list = [int(float(ids_str))]
+                except ValueError:
+                    continue
+
+            for category_id, category_name in zip(ids_list, names_list):
+                raw_mappings.append(
+                    {
+                        "object_annotation_category": category_name,
+                        "object_annotation_category_id": category_id,
+                    }
+                )
+
+    # ------------------------------------------------------------------
+    # Old EcoTaxa export (singular columns)
+    # ------------------------------------------------------------------
+    elif (
+        "object_annotation_category" in df.columns
+        and "object_annotation_category_id" in df.columns
+    ):
+        mapping_df = (
+            df[
+                [
+                    "object_annotation_category",
+                    "object_annotation_category_id",
+                ]
+            ]
+            .dropna()
+            .drop_duplicates()
+        )
+
+        raw_mappings = mapping_df.to_dict("records")
+
+    else:
+        raise KeyError(
+            "Could not find either "
+            "('object_annotation_category_ids', 'object_annotation_categories') "
+            "or "
+            "('object_annotation_category', 'object_annotation_category_id') "
+            "in the EcoTaxa export."
+        )
+
+    if not raw_mappings:
+        raise ValueError(f"No valid category mappings found in {export_file.name}")
+
+    mapping_df = (
+        pd.DataFrame(raw_mappings)
+        .drop_duplicates()
+        .sort_values("object_annotation_category_id")
+    )
+
+    mapping_file.parent.mkdir(parents=True, exist_ok=True)
+    mapping_df.to_csv(mapping_file, sep="\t", index=False)
+
+    print(f"Generated mapping file: {mapping_file}")
 def _mapping_file() -> Path:
+    global _PROJECT_ROOT
+    if _PROJECT_ROOT is not None:
+        data_dir = _PROJECT_ROOT / "data"
+        if data_dir.exists() and data_dir.is_dir():
+            print(f"Looking for Ecotaxa export files in project data directory: {data_dir}")
+            # Find all ecotaxa_export tsv files inside the /data directory
+            candidates = list(data_dir.glob("ecotaxa_export*.tsv"))
+            if candidates:
+                # Choose the most recently modified export file
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                latest_export = candidates[0]
+                print(f"Using Ecotaxa export file: {latest_export}")
+                # Define mapping file path under /data
+                mapping_file_path = data_dir / "mapping.tsv"
+                
+                # Generate/Update the mapping file using the latest export
+                _generate_mapping_file(latest_export, mapping_file_path)
+                
+                return mapping_file_path
+
+    # Fallback to the packaged mapping if no project root or export files exist
+    return Path(__file__).resolve().parents[2] / "ecotaxa-classes.tsv"
+# def _mapping_file() -> Path:
     # Prefer a project-local Ecotaxa export (most recent) when available.
     # Fall back to the packaged ecotaxa-classes.tsv next to this module.
-    global _PROJECT_ROOT
-    candidates: list[Path] = []
+    # global _PROJECT_ROOT
+    # candidates: list[Path] = []
 
-    if _PROJECT_ROOT is not None:
-        # common locations and patterns for Ecotaxa exports inside a project
-        patterns = [
-            "ecotaxa_export*.tsv",
-            "ecotaxa_*.tsv",
-            "ecotaxa/**/*.tsv",
-            "**/ecotaxa_export*.tsv",
-            "**/ecotaxa_*.tsv",
-        ]
+    # if _PROJECT_ROOT is not None:
+    #     # common locations and patterns for Ecotaxa exports inside a project
+    #     patterns = [
+    #         "ecotaxa_export*.tsv",
+    #         "ecotaxa_*.tsv",
+    #         "ecotaxa/**/*.tsv",
+    #         "**/ecotaxa_export*.tsv",
+    #         "**/ecotaxa_*.tsv",
+    #     ]
 
-        for pattern in patterns:
-            for path in _PROJECT_ROOT.rglob(pattern):
-                if path.is_file():
-                    candidates.append(path)
+    #     for pattern in patterns:
+    #         for path in _PROJECT_ROOT.rglob(pattern):
+    #             if path.is_file():
+    #                 candidates.append(path)
 
-    if candidates:
-        # choose the most recently modified export
-        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-        return candidates[0]
+    # if candidates:
+    #     # choose the most recently modified export
+    #     candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    #     return candidates[0]
 
-    # fallback to packaged mapping
-    return Path(__file__).resolve().parents[2] / "ecotaxa-classes.tsv"
+    # # fallback to packaged mapping
+    # return Path(__file__).resolve().parents[2] / "ecotaxa-classes.tsv"
 
 
 def _load_category_mapping(tsv_path: Path) -> dict[str, int]:
