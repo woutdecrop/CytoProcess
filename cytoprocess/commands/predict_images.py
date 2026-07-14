@@ -52,6 +52,7 @@ SEGMENTATION_FALLBACK_LABEL = "out of focus"
 _THREAD_LOCAL = local()
 _CATEGORY_MAPPING: dict[str, int] | None = None
 _LOCAL_PREDICTOR: dict | None = None
+_PROJECT_ROOT: Path | None = None
 
 
 def _configure_safe_console_encoding() -> None:
@@ -253,6 +254,32 @@ def _as_list(value):
 
 
 def _mapping_file() -> Path:
+    # Prefer a project-local Ecotaxa export (most recent) when available.
+    # Fall back to the packaged ecotaxa-classes.tsv next to this module.
+    global _PROJECT_ROOT
+    candidates: list[Path] = []
+
+    if _PROJECT_ROOT is not None:
+        # common locations and patterns for Ecotaxa exports inside a project
+        patterns = [
+            "ecotaxa_export*.tsv",
+            "ecotaxa_*.tsv",
+            "ecotaxa/**/*.tsv",
+            "**/ecotaxa_export*.tsv",
+            "**/ecotaxa_*.tsv",
+        ]
+
+        for pattern in patterns:
+            for path in _PROJECT_ROOT.rglob(pattern):
+                if path.is_file():
+                    candidates.append(path)
+
+    if candidates:
+        # choose the most recently modified export
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return candidates[0]
+
+    # fallback to packaged mapping
     return Path(__file__).resolve().parents[2] / "ecotaxa-classes.tsv"
 
 
@@ -833,6 +860,11 @@ def run(
     logger = setup_logging(command="predict_images", project=project, debug=ctx.obj["debug"])
     log_command_start(logger, "Predicting image classes", project)
     logger.debug("Context: %s", getattr(ctx, "obj", {}))
+    global _PROJECT_ROOT
+    try:
+        _PROJECT_ROOT = project.resolve()
+    except Exception:
+        _PROJECT_ROOT = project
     requested_backend = (os.environ.get(PREDICT_BACKEND_ENV) or backend or "local").lower()
     if force:
         logger.debug("Force flag enabled, existing prediction files will be overwritten")
