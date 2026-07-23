@@ -222,7 +222,7 @@ cytoprocess train path/to/project
 
 The command performs these steps:
 
-1. Find the newest EcoTaxa export in `data/ecotaxa_export*.tsv`, or download a fresh TSV export from the EcoTaxa project configured in `config/config.yaml`.
+1. Find the newest EcoTaxa **Classification Export** in `data/*classification*export*.tsv`, or download a fresh Classification Export from the EcoTaxa project configured in `config/config.yaml`.
 2. Keep only objects whose EcoTaxa annotation status is `validated`.
 3. Match each validated `object_id` from the EcoTaxa export to the corresponding local image in `work/<sample>/images`.
 4. Copy matched images into category folders under `data/images_validated/`.
@@ -230,10 +230,10 @@ The command performs these steps:
 6. Create or update the `planktonclass` project layout under `train/` and set `train/config.yaml` to train from `../data/images_validated`.
 7. Run `planktonclass train --config train/config.yaml` and save the new model under `train/models/`.
 
-If an existing EcoTaxa export is found, CytoProcess asks whether to reuse it. Answer `n` to download a fresh export. You can also provide an export explicitly:
+If an existing EcoTaxa Classification Export is found, CytoProcess asks whether to reuse it. Answer `n` to download a fresh Classification Export. `train --export-only` follows the same behavior. You can also provide an export explicitly:
 
 ```bash
-cytoprocess train path/to/project --export-tsv path/to/ecotaxa_export.tsv
+cytoprocess train path/to/project --export-tsv path/to/classification_export.tsv
 ```
 
 To prepare the validated image dataset and `train/config.yaml` without starting the training run, use:
@@ -252,7 +252,7 @@ You can now separate the dataset export/preparation and the training steps:
 ```bash
 # Prepare validated images and training config, but do not start training. 
 #this is useful if you first need to download the images from ecotaxa and then select which classes you want to include in the model. For that, after running this comand you need to delete the folders you don't want to include of images_validated before running the next step. 
-cytoprocess train path/to/project --export-only
+cytoprocess train path/to/project --export-only  # downloads/reuses the Classification Export by default
 
 # Run only the training step using an existing train/config.yaml
 cytoprocess train path/to/project --train-only

@@ -249,6 +249,7 @@ def all(ctx, project, force, n_poly, max_cores):
 @click.option("--predict-backend", type=click.Choice(["local", "docker"]), default="local", show_default=True, help="Prediction backend to use. Local is recommended and will auto-install the Zenodo model when needed.")
 @click.option("--predict-zenodo-version", default=None, help="Optional Zenodo record id, DOI, record URL, or direct zip URL for a specific local model version.")
 @click.option("--skip-upload", is_flag=True, default=False, help="Stop after image prediction and do not upload or sync predictions to EcoTaxa.")
+@click.option("--predict-validated", is_flag=True, default=False, help="Also predict objects marked validated in the newest EcoTaxa Object or Classification Export.")
 @click.option("--username", "-u", help="EcoTaxa email address.")
 @click.option("--password", "-p", help="EcoTaxa password.")
 @click.pass_context
@@ -261,6 +262,7 @@ def all_predict(
     predict_backend,
     predict_zenodo_version,
     skip_upload,
+    predict_validated,
     username,
     password,
 ):
@@ -290,6 +292,7 @@ def all_predict(
         force=force,
         backend=predict_backend,
         zenodo_version=predict_zenodo_version,
+        predict_validated=predict_validated,
     )
     if skip_upload:
         logger.info("Skipping EcoTaxa upload and prediction sync")
@@ -330,8 +333,9 @@ def clean(ctx, project, older_than):
 @click.argument("project", type=click.Path(exists=True))
 @click.option("--model", "-m", required=True, help="A function encapsulating the prediction model, specificed as 'path/to/model.py::func_name' or 'my_module.func_name'.")
 @click.option("--force", "-f", is_flag=True, default=False, help="Force re-prediction even if output already exists. ")
+@click.option("--predict-validated", is_flag=True, default=False, help="Also predict objects marked validated in the newest EcoTaxa Object or Classification Export.")
 @click.pass_context
-def predict(ctx, project, model, force):
+def predict(ctx, project, model, force, predict_validated):
     """
     Run a user-provided model to predict classifications.
 
@@ -347,7 +351,7 @@ def predict(ctx, project, model, force):
     NB: Images contain a 31 pixels-high scale bar at the bottom. It should be cropped out before feeding the image to a deep learning model.
     """
     from cytoprocess.commands import predict
-    predict.run(ctx, project=Path(project).expanduser(), function_spec=model, force=force)
+    predict.run(ctx, project=Path(project).expanduser(), function_spec=model, force=force, predict_validated=predict_validated)
 
 
 @cli.command(name="predict_images")
@@ -358,8 +362,9 @@ def predict(ctx, project, model, force):
 @click.option("--local-model-root", default=None, help="Optional local model root directory. By default, the newest model in <project>/train/models is preferred.")
 @click.option("--local-timestamp", default=None, help="Optional local model timestamp directory to use inside the selected model root.")
 @click.option("--ckpt-name", default=None, help="Optional checkpoint filename to use for local prediction.")
+@click.option("--predict-validated", is_flag=True, default=False, help="Also predict objects marked validated in the newest EcoTaxa Object or Classification Export.")
 @click.pass_context
-def predict_images(ctx, project, force, backend, zenodo_version, local_model_root, local_timestamp, ckpt_name):
+def predict_images(ctx, project, force, backend, zenodo_version, local_model_root, local_timestamp, ckpt_name, predict_validated):
     """
     Run the bundled plankton classifier against extracted images.
 
@@ -375,6 +380,7 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
         local_model_root=local_model_root,
         local_timestamp=local_timestamp,
         ckpt_name=ckpt_name,
+        predict_validated=predict_validated,
     )
 
 
@@ -385,7 +391,7 @@ def predict_images(ctx, project, force, backend, zenodo_version, local_model_roo
     default=None,
     type=click.Path(exists=True),
     help=(
-        "Use this EcoTaxa TSV export instead of reusing or downloading one. "
+        "Use this EcoTaxa Classification Export TSV instead of reusing or downloading one. "
         "The export must contain validated objects with object_id, object_annotation_status, "
         "and object_annotation_category columns."
     ),
@@ -435,9 +441,9 @@ def train(ctx, project, export_tsv, force, config_only, annotator, export_only, 
 
     \b
     Steps performed:
-    1. Reuse the newest data/ecotaxa_export*.tsv when available, or ask whether
-       to download a fresh TSV export from the EcoTaxa project configured in
-       config/config.yaml.
+    1. Reuse the newest data/*classification*export*.tsv when available, or ask
+       whether to download a fresh EcoTaxa Classification Export from the
+       EcoTaxa project configured in config/config.yaml.
     2. Keep only rows whose object_annotation_status is "validated".
     3. Match each validated EcoTaxa object_id to the local extracted image.
     4. Copy matched images into data/images_validated/<category>/ and write

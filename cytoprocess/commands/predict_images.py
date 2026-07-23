@@ -20,6 +20,7 @@ try:
 except ImportError:
     tqdm = None
 
+from cytoprocess.ecotaxa_export import validated_object_ids
 from cytoprocess.logging import log_command_start, log_command_success, setup_logging
 from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
@@ -986,6 +987,7 @@ def run(
     local_timestamp: str | None = None,
     ckpt_name: str | None = None,
     zenodo_version: str | None = None,
+    predict_validated: bool = False,
 ):
     logger = setup_logging(command="predict_images", project=project, debug=ctx.obj["debug"])
     log_command_start(logger, "Predicting image classes", project)
@@ -1002,6 +1004,10 @@ def run(
     sample_dirs = list_sample_assets(project, "dir", logger, samples_mask=ctx.obj["sample"])
     if not sample_dirs:
         return
+
+    validated_ids = None if predict_validated else validated_object_ids(project, logger)
+    if predict_validated:
+        logger.info("Including validated EcoTaxa objects in prediction")
 
     discovered_local_model_root = _discover_local_model_root(project, local_model_root)
     backend = requested_backend
@@ -1083,6 +1089,21 @@ def run(
 
         now = datetime.now(timezone.utc)
         annotation_date = now.strftime("%Y-%m-%d")
+        if validated_ids is not None:
+            original_count = len(image_files)
+            image_files = [
+                image_file
+                for image_file in image_files
+                if _object_id_from_image_file(image_file, sample_id) not in validated_ids
+            ]
+            skipped_count = original_count - len(image_files)
+            if skipped_count:
+                logger.info(f"  Skipping {skipped_count} already validated image(s)")
+            if not image_files:
+                pd.DataFrame(columns=["sample_id", "object_id"]).to_parquet(output_file, index=False)
+                logger.info("  All images are already validated; wrote an empty prediction file")
+                continue
+
         annotation_time = now.strftime("%H:%M:%S")
 
         image_files_to_predict, segmentation_failed_files = _split_images_by_segmentation_status(

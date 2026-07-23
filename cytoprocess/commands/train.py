@@ -18,8 +18,8 @@ from cytoprocess.logging import log_command_start, log_command_success, setup_lo
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 INVALID_PATH_CHARS = re.compile(r'[<>:"/\\|?*]')
-EXPORT_GLOB = "ecotaxa_export*.tsv"
-EXPORT_PREFIX = "ecotaxa_export"
+EXPORT_GLOB = "*classification*export*.tsv"
+EXPORT_PREFIX = "ecotaxa_classification_export"
 DATA_DIRNAME = "data"
 TRAINING_IMAGES_DIRNAME = "images_validated"
 TRAINING_MANIFEST_FILENAME = "validated_images.tsv"
@@ -113,41 +113,39 @@ def _download_export_archive(
     export_archive_path: Path,
     logger,
 ) -> Path:
+    # This is EcoTaxa's Classification/Identification Export.  Unlike the
+    # general object export, it is specifically intended to retain annotation
+    # information needed to build a validated training set.
     request_payload = {
         "filters": {},
         "request": {
             "project_id": project_id,
-            "exp_type": "TSV",
-            "tsv_entities": "O",
-            "split_by": "",
-            "with_types_row": False,
-            "with_internal_ids": False,
-            "format_dates_times": True,
-            "coma_as_separator": False,
+            "only_annotations": True,
+            "out_to_ftp": False,
         },
     }
 
-    logger.info(f"Requesting a fresh EcoTaxa TSV export for project {project_id}")
+    logger.info(f"Requesting a fresh EcoTaxa Classification Export for project {project_id}")
     try:
         response = requests.post(
-            f"{api_url}/object_set/export",
+            f"{api_url}/object_set/export/general",
             headers={"Authorization": f"Bearer {token}"},
             json=request_payload,
             timeout=120,
         )
     except requests.RequestException as exc:
-        _raise_train_error(f"Failed to start EcoTaxa export: {exc}", logger)
+        _raise_train_error(f"Failed to start EcoTaxa Classification Export: {exc}", logger)
 
     if response.status_code != 200:
-        _raise_train_error(f"Failed to start EcoTaxa export: {response.text}", logger)
+        _raise_train_error(f"Failed to start EcoTaxa Classification Export: {response.text}", logger)
 
     response_payload = response.json() or {}
     job_id = response_payload.get("job_id")
     if not job_id:
-        _raise_train_error(f"EcoTaxa export did not return a job id: {response_payload}", logger)
+        _raise_train_error(f"EcoTaxa Classification Export did not return a job id: {response_payload}", logger)
 
     if not ecotaxa.monitor_job(api_url, int(job_id), token, logger=logger):
-        _raise_train_error(f"EcoTaxa export job {job_id} did not complete successfully", logger)
+        _raise_train_error(f"EcoTaxa Classification Export job {job_id} did not complete successfully", logger)
 
     logger.info(f"Downloading EcoTaxa export job file {job_id}")
     try:

@@ -5,6 +5,7 @@ from pathlib import Path
 import click
 import pandas as pd
 
+from cytoprocess.ecotaxa_export import validated_object_ids
 from cytoprocess.logging import setup_logging, log_command_start, log_command_success
 from cytoprocess.project import list_sample_assets, path_to_sample_asset
 from cytoprocess.utils import raiseCytoError
@@ -38,7 +39,7 @@ def _load_predict_fn(spec: str):
     return getattr(module, func_name)
 
 
-def run(ctx: click.Context, project: Path, function_spec: str, force: bool = False):
+def run(ctx: click.Context, project: Path, function_spec: str, force: bool = False, predict_validated: bool = False):
     # Housekeeping for the command
     logger = setup_logging(command="predict", project=project, debug=ctx.obj["debug"])
     log_command_start(logger, "Running predictions", project)
@@ -59,6 +60,7 @@ def run(ctx: click.Context, project: Path, function_spec: str, force: bool = Fal
     if not sample_dirs:
         return
     sample_ids = [d.name for d in sample_dirs]
+    validated_ids = None if predict_validated else validated_object_ids(project, logger)
 
     logger.info(f"Running predictions for {len(sample_ids)} sample(s)")
 
@@ -89,6 +91,12 @@ def run(ctx: click.Context, project: Path, function_spec: str, force: bool = Fal
 
         # Combine features and prepare image paths
         features_df = cytometric_df.merge(image_features_df, on=["sample_id", "object_id"], how="left")
+        if validated_ids is not None:
+            features_df = features_df[~features_df["object_id"].astype(str).isin(validated_ids)].copy()
+            if features_df.empty:
+                pd.DataFrame(columns=["sample_id", "object_id"]).to_parquet(predictions_file, index=False)
+                logger.info("  All objects are already validated; wrote an empty prediction file")
+                continue
 
         images_dir = project / path_to_sample_asset(sample_id, "images", logger)
         image_paths = [str(images_dir / f"{obj_id.replace(sample_id + '_', '', 1)}_img.jpg") for obj_id in features_df["object_id"]]
