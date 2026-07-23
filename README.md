@@ -243,6 +243,7 @@ cytoprocess train path/to/project --config
 ```
 
 This is useful when you want to inspect or edit the `planktonclass` settings first. Once `train/config.yaml` is ready, run `cytoprocess train path/to/project` again. Use `--force` when you want to delete and rebuild `data/images_validated` before training.
+Use `--annotator "name of the taxonomist"` e.x. `--annotator "Luz Amadei Matinez"` when you want to use the validated images by only one selected taxonomist.
 
 New: split export and training
 
