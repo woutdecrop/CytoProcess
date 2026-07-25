@@ -368,7 +368,7 @@ def _mapping_file() -> Path:
         if data_dir.exists() and data_dir.is_dir():
             print(f"Looking for Ecotaxa export files in project data directory: {data_dir}")
             # Find all ecotaxa_export tsv files inside the /data directory
-            candidates = list(data_dir.glob("ecotaxa_export*.tsv"))
+            candidates = list(data_dir.glob("ecotaxa_classification_export*.tsv"))
             if candidates:
                 # Choose the most recently modified export file
                 candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
