@@ -269,7 +269,7 @@ cytoprocess predict_images path/to/project --local-timestamp <timestamp>
 
 or for the upload-and-sync workflow with a specific model:
 ```bash
-cytoprocess upload_all_predictions path/to/project --local-timestamp <timestamp>
+cytoprocess upload_all_predictions path/to/project
 ```
 
 For the full end-to-end workflow, use:
